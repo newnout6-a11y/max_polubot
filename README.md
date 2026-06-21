@@ -1,6 +1,6 @@
 ---
 title: Bot Max
-emoji: 🔥
+emoji: 🤖
 colorFrom: blue
 colorTo: yellow
 sdk: docker

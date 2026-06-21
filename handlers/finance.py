@@ -9,10 +9,10 @@ async def handle_financial_message(client, msg_id, text, sender_id, timestamp, c
     """Store target-chat messages; AI parsing is started by command or report."""
     target_chat_id = int(getattr(client, "target_chat_id", 0) or 0)
     if not target_chat_id:
-        logger.info("Ignoring non-command message %s: target_chat_id is not configured.", msg_id)
+        logger.debug("Ignoring non-command message %s: target_chat_id is not configured.", msg_id)
         return
-    if not chat_id or int(chat_id) != target_chat_id:
-        logger.info(
+    if chat_id is None or int(chat_id) != target_chat_id:
+        logger.debug(
             "Ignoring non-command message %s from chat %s: target_chat_id is %s.",
             msg_id,
             chat_id,

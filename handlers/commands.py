@@ -23,6 +23,12 @@ from db.models import Database
 logger = logging.getLogger(__name__)
 
 
+def _public_ai_error(exc: Exception) -> str:
+    if isinstance(exc, AIProviderError):
+        return str(exc)
+    return "AI provider returned an invalid response. Check provider/model/base_url in logs."
+
+
 def _yes_no(value: bool) -> str:
     return "\u0434\u0430" if value else "\u043d\u0435\u0442"
 
@@ -155,7 +161,8 @@ async def cmd_ask_ai(client, args, sender_id, context=None):
     try:
         answer = await ask_ai(question, settings=settings)
     except Exception as exc:
-        await client.queue.put(f"AI error: {exc}")
+        logger.error("AI question failed: %s", exc)
+        await client.queue.put(f"AI error: {_public_ai_error(exc)}")
         return
     await client.queue.put(answer or "<empty AI response>")
 

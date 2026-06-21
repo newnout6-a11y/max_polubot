@@ -43,6 +43,18 @@ class AIProviderError(RuntimeError):
         return self.status_code is not None and 400 <= self.status_code < 500
 
 
+def _response_json(response: httpx.Response, provider: str):
+    try:
+        return response.json()
+    except json.JSONDecodeError as exc:
+        body = _short_body(response.text)
+        raise AIProviderError(
+            f"{provider} API returned non-JSON body: {body or 'empty response'}",
+            status_code=response.status_code,
+            response_body=body,
+        ) from exc
+
+
 class Transaction(BaseModel):
     category: str = Field(description="Lowercase category or item name.")
     expense: int = Field(default=0, ge=0, description="Positive amount spent.")
@@ -232,6 +244,7 @@ async def _chat_completions_request(
             {"role": "user", "content": prompt},
         ],
         "temperature": 0,
+        "stream": False,
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
@@ -239,9 +252,16 @@ async def _chat_completions_request(
     async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT_SECONDS) as client:
         response = await client.post(url, headers=headers, json=payload)
         _raise_ai_status(response, "chat_completions")
-        data = response.json()
+        data = _response_json(response, "chat_completions")
 
-    return data["choices"][0]["message"]["content"]
+    try:
+        return data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise AIProviderError(
+            "chat_completions API returned an unexpected response shape",
+            status_code=response.status_code,
+            response_body=_short_body(response.text),
+        ) from exc
 
 
 async def _parse_with_openai_compatible(text: str, api_key: str, model: str, base_url: str):
@@ -310,7 +330,7 @@ async def _parse_with_responses_api(
     async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT_SECONDS) as client:
         response = await client.post(url, headers=headers, json=payload)
         _raise_ai_status(response, "responses")
-        data = response.json()
+        data = _response_json(response, "responses")
 
     return _extract_response_text(data)
 
