@@ -3,7 +3,13 @@ import shlex
 import time
 
 from ai.parser import AIProviderError, ask_ai, is_ai_available, parse_financial_message
-from core.config import COMMAND_PREFIX
+from core.config import (
+    COMMAND_PREFIX,
+    HISTORY_DEFAULT_DAYS,
+    HISTORY_MAX_DAYS,
+    HISTORY_MAX_MESSAGES,
+    HISTORY_PAGE_SIZE,
+)
 from core.session_probe import probe_session
 from core.settings import (
     SETTINGS,
@@ -31,6 +37,11 @@ def _parse_stats_period(args: str) -> tuple[int, str]:
         return 30, "\u043c\u0435\u0441\u044f\u0446"
     if normalized in {"\u0434\u0435\u043d\u044c", "1", "1\u0434", "1d", "day"}:
         return 1, "\u0434\u0435\u043d\u044c"
+    raw_days = normalized.split()[0] if normalized else ""
+    raw_days = raw_days.removesuffix("\u0434").removesuffix("d")
+    if raw_days.isdigit():
+        days = max(1, min(int(raw_days), HISTORY_MAX_DAYS))
+        return days, f"{days} \u0434\u043d."
     return 7, "\u043d\u0435\u0434\u0435\u043b\u044e"
 
 
@@ -147,6 +158,103 @@ async def cmd_ask_ai(client, args, sender_id, context=None):
         await client.queue.put(f"AI error: {exc}")
         return
     await client.queue.put(answer or "<empty AI response>")
+
+
+def _parse_history_days(args: str) -> int:
+    raw = (args or "").strip().split()
+    if not raw:
+        return HISTORY_DEFAULT_DAYS
+    try:
+        days = int(raw[0])
+    except ValueError:
+        return HISTORY_DEFAULT_DAYS
+    return max(1, min(days, HISTORY_MAX_DAYS))
+
+
+async def cmd_history(client, args, sender_id, context=None):
+    if not hasattr(client, "fetch_chat_history"):
+        await client.queue.put("MAX history fetch is not supported by this client.")
+        return
+
+    target_chat_id = int(getattr(client, "target_chat_id", 0) or 0)
+    if not target_chat_id:
+        await client.queue.put(
+            f"\u0421\u043d\u0430\u0447\u0430\u043b\u0430 \u0437\u0430\u0434\u0430\u0439 target_chat_id: "
+            f"{COMMAND_PREFIX}\u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 target_chat_id here"
+        )
+        return
+
+    days = _parse_history_days(args)
+    since_ms = int((time.time() - days * 24 * 60 * 60) * 1000)
+    from_ms = int(time.time() * 1000) + 1
+    seen_ids = set()
+    scanned = 0
+    saved = 0
+    pages = 0
+
+    while scanned < HISTORY_MAX_MESSAGES:
+        page = await client.fetch_chat_history(
+            target_chat_id,
+            from_time_ms=from_ms,
+            backward=min(HISTORY_PAGE_SIZE, HISTORY_MAX_MESSAGES - scanned),
+        )
+        if not page:
+            break
+
+        pages += 1
+        page_oldest = None
+        page_new_ids = 0
+        for message in page:
+            msg_id = str(message.get("id") or "")
+            if not msg_id or msg_id in seen_ids:
+                continue
+            seen_ids.add(msg_id)
+            page_new_ids += 1
+
+            try:
+                timestamp = int(message.get("time") or 0)
+            except (TypeError, ValueError):
+                timestamp = 0
+            if timestamp:
+                page_oldest = timestamp if page_oldest is None else min(page_oldest, timestamp)
+
+            scanned += 1
+            if timestamp and timestamp < since_ms:
+                continue
+
+            text = str(message.get("text") or "").strip()
+            if not text:
+                continue
+
+            await Database.save_message(
+                msg_id,
+                text,
+                message.get("sender") or 0,
+                timestamp,
+                chat_id=target_chat_id,
+            )
+            saved += 1
+
+            if scanned >= HISTORY_MAX_MESSAGES:
+                break
+
+        if page_oldest is None or page_new_ids == 0:
+            break
+        if page_oldest <= since_ms:
+            break
+        from_ms = page_oldest - 1
+
+    await client.queue.put(
+        "\n".join(
+            [
+                f"\u0418\u0441\u0442\u043e\u0440\u0438\u044f \u0437\u0430 {days} \u0434\u043d. \u0441\u043a\u0430\u0447\u0430\u043d\u0430.",
+                f"- \u0421\u0442\u0440\u0430\u043d\u0438\u0446: {pages}",
+                f"- \u041f\u0440\u043e\u0441\u043c\u043e\u0442\u0440\u0435\u043d\u043e: {scanned}",
+                f"- \u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u043e \u0442\u0435\u043a\u0441\u0442\u043e\u0432\u044b\u0445: {saved}",
+                f"\u0414\u0430\u043b\u044c\u0448\u0435: {COMMAND_PREFIX}\u0440\u0430\u0437\u043e\u0431\u0440\u0430\u0442\u044c {days}",
+            ]
+        )
+    )
 
 
 async def cmd_status(client, args, sender_id, context=None):
@@ -337,6 +445,8 @@ async def cmd_help(client, args, sender_id, context=None):
         f"- {prefix}\u0441\u0442\u0430\u0442\u0430 - \u0441\u0432\u043e\u0434\u043a\u0430 \u0437\u0430 7 \u0434\u043d\u0435\u0439\n"
         f"- {prefix}\u0440\u0430\u0437\u043e\u0431\u0440\u0430\u0442\u044c \u043d\u0435\u0434\u0435\u043b\u044f - AI-\u0440\u0430\u0437\u0431\u043e\u0440 \u043d\u043e\u0432\u044b\u0445 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439\n"
         f"- {prefix}\u0440\u0430\u0437\u043e\u0431\u0440\u0430\u0442\u044c \u043d\u0435\u0434\u0435\u043b\u044f all - \u043f\u043e\u0432\u0442\u043e\u0440\u043d\u044b\u0439 \u0440\u0430\u0437\u0431\u043e\u0440 \u0432\u0441\u0435\u0445 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439\n"
+        f"- {prefix}\u0438\u0441\u0442\u043e\u0440\u0438\u044f 10 - \u0441\u043a\u0430\u0447\u0430\u0442\u044c \u0438\u0441\u0442\u043e\u0440\u0438\u044e target-\u0447\u0430\u0442\u0430 \u0437\u0430 10 \u0434\u043d\u0435\u0439\n"
+        f"- {prefix}\u0440\u0430\u0437\u043e\u0431\u0440\u0430\u0442\u044c 10 - AI-\u0440\u0430\u0437\u0431\u043e\u0440 \u0437\u0430 10 \u0434\u043d\u0435\u0439\n"
         f"- {prefix}ai \u0432\u043e\u043f\u0440\u043e\u0441 - \u0441\u043f\u0440\u043e\u0441\u0438\u0442\u044c AI\n"
         f"- {prefix}\u0441\u0442\u0430\u0442\u0430 \u043c\u0435\u0441\u044f\u0446 - \u0441\u0432\u043e\u0434\u043a\u0430 \u0437\u0430 30 \u0434\u043d\u0435\u0439\n"
         f"- {prefix}\u0441\u0442\u0430\u0442\u0443\u0441 - \u0431\u044b\u0441\u0442\u0440\u044b\u0439 \u0441\u0442\u0430\u0442\u0443\u0441\n"

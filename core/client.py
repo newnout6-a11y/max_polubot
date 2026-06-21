@@ -197,6 +197,40 @@ class MaxWebsocketClient:
             require_authenticated=True,
         )
 
+    async def fetch_chat_history(
+        self,
+        chat_id: int,
+        *,
+        from_time_ms: int | None = None,
+        backward: int = 100,
+    ) -> list[dict]:
+        """Fetch a page of chat history without sending anything to the chat."""
+        payload = {
+            "chatId": int(chat_id),
+            "from": int(from_time_ms or time.time() * 1000),
+            "forward": 0,
+            "backward": int(backward),
+            "backwardTime": 0,
+            "forwardTime": 0,
+            "getChat": False,
+            "getMessages": True,
+            "interactive": False,
+            "itemType": "REGULAR",
+        }
+        response = await self._send(49, payload, require_authenticated=True)
+        messages = (response.get("payload") or {}).get("messages") or []
+        if isinstance(messages, dict):
+            flattened = []
+            for value in messages.values():
+                if isinstance(value, list):
+                    flattened.extend(item for item in value if isinstance(item, dict))
+                elif isinstance(value, dict):
+                    flattened.append(value)
+            return flattened
+        if isinstance(messages, list):
+            return [item for item in messages if isinstance(item, dict)]
+        return []
+
     async def start(self):
         """Run the client until stopped, reconnecting on transient failures."""
         backoff = MAX_BACKOFF_INITIAL_SECONDS

@@ -123,6 +123,10 @@ COMMAND_ALIASES_ASK_AI = _csv_str_env(
     "COMMAND_ALIASES_ASK_AI",
     ("ai", "\u0430\u0439", "\u0441\u043f\u0440\u043e\u0441\u0438"),
 )
+COMMAND_ALIASES_HISTORY = _csv_str_env(
+    "COMMAND_ALIASES_HISTORY",
+    ("\u0438\u0441\u0442\u043e\u0440\u0438\u044f", "history", "backfill"),
+)
 COMMAND_ALIASES_HELP = _csv_str_env("COMMAND_ALIASES_HELP", ("\u0445\u0435\u043b\u043f", "help"))
 COMMAND_ALIASES_STATUS = _csv_str_env(
     "COMMAND_ALIASES_STATUS",
@@ -157,6 +161,11 @@ QUEUE_MAX_SIZE = _int_env("QUEUE_MAX_SIZE", 100)
 QUEUE_SEND_RETRIES = _int_env("QUEUE_SEND_RETRIES", 5)
 QUEUE_RETRY_DELAY_SECONDS = _float_env("QUEUE_RETRY_DELAY_SECONDS", 5.0)
 QUEUE_PUT_TIMEOUT_SECONDS = _float_env("QUEUE_PUT_TIMEOUT_SECONDS", 2.0)
+
+HISTORY_DEFAULT_DAYS = _int_env("HISTORY_DEFAULT_DAYS", 10)
+HISTORY_MAX_DAYS = _int_env("HISTORY_MAX_DAYS", 30)
+HISTORY_PAGE_SIZE = _int_env("HISTORY_PAGE_SIZE", 100)
+HISTORY_MAX_MESSAGES = _int_env("HISTORY_MAX_MESSAGES", 2000)
 
 MAX_WS_URL = _env("MAX_WS_URL", "wss://ws-api.oneme.ru/websocket")
 MAX_WS_ORIGIN = _env("MAX_WS_ORIGIN", "https://web.max.ru")
@@ -234,6 +243,14 @@ def validate_startup_config() -> StartupValidation:
         errors.append("QUEUE_MAX_SIZE must be positive")
     if QUEUE_SEND_RETRIES < 0:
         errors.append("QUEUE_SEND_RETRIES cannot be negative")
+    if HISTORY_DEFAULT_DAYS <= 0:
+        errors.append("HISTORY_DEFAULT_DAYS must be positive")
+    if HISTORY_MAX_DAYS < HISTORY_DEFAULT_DAYS:
+        errors.append("HISTORY_MAX_DAYS must be greater than or equal to HISTORY_DEFAULT_DAYS")
+    if HISTORY_PAGE_SIZE <= 0:
+        errors.append("HISTORY_PAGE_SIZE must be positive")
+    if HISTORY_MAX_MESSAGES <= 0:
+        errors.append("HISTORY_MAX_MESSAGES must be positive")
     if not 0 <= REPORT_HOUR <= 23:
         errors.append("REPORT_HOUR must be between 0 and 23")
     if not 0 <= REPORT_MINUTE <= 59:

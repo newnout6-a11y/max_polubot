@@ -5,3 +5,4 @@ session.json
 .env
 *.db
 .antigravityignore
+.codebase-memory/
