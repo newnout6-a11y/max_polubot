@@ -7,6 +7,9 @@ from psycopg_pool import AsyncConnectionPool
 
 from core.config import (
     DATABASE_URL,
+    AI_MAX_PARSE_ATTEMPTS,
+    AI_RETRY_BASE_SECONDS,
+    AI_RETRY_MAX_SECONDS,
     DB_CONNECT_TIMEOUT_SECONDS,
     DB_POOL_MAX_SIZE,
     DB_POOL_MIN_SIZE,
@@ -79,6 +82,7 @@ class Database:
                     timestamp BIGINT NOT NULL,
                     is_parsed BOOLEAN DEFAULT FALSE,
                     parse_attempts INTEGER DEFAULT 0,
+                    next_parse_at BIGINT DEFAULT 0,
                     last_error TEXT,
                     parsed_at BIGINT,
                     updated_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
@@ -89,6 +93,7 @@ class Database:
                 """
                 ALTER TABLE messages
                     ADD COLUMN IF NOT EXISTS parse_attempts INTEGER DEFAULT 0,
+                    ADD COLUMN IF NOT EXISTS next_parse_at BIGINT DEFAULT 0,
                     ADD COLUMN IF NOT EXISTS last_error TEXT,
                     ADD COLUMN IF NOT EXISTS parsed_at BIGINT,
                     ADD COLUMN IF NOT EXISTS updated_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
@@ -107,7 +112,7 @@ class Database:
                 """
             )
             await conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_messages_unparsed ON messages (is_parsed, timestamp)"
+                "CREATE INDEX IF NOT EXISTS idx_messages_unparsed ON messages (is_parsed, next_parse_at, timestamp)"
             )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_finances_date_category ON finances (date, category)"
@@ -169,10 +174,12 @@ class Database:
                     SELECT *
                     FROM messages
                     WHERE is_parsed = FALSE
+                      AND parse_attempts < %s
+                      AND COALESCE(next_parse_at, 0) <= %s
                     ORDER BY timestamp ASC
                     LIMIT %s
                     """,
-                    (limit,),
+                    (AI_MAX_PARSE_ATTEMPTS, int(time.time()), limit),
                 )
                 return await cur.fetchall()
 
@@ -185,6 +192,7 @@ class Database:
                 UPDATE messages
                 SET is_parsed = TRUE,
                     last_error = NULL,
+                    next_parse_at = 0,
                     parsed_at = %s,
                     updated_at = %s
                 WHERE id = %s
@@ -193,18 +201,29 @@ class Database:
             )
 
     @staticmethod
-    async def mark_parse_failed(msg_id, error):
+    async def mark_parse_failed(msg_id, error, retry_after_seconds: float | None = None):
         pool = Database._require_pool()
+        now = int(time.time())
+        if retry_after_seconds is None:
+            retry_after_seconds = AI_RETRY_BASE_SECONDS
+        retry_after = min(int(retry_after_seconds), int(AI_RETRY_MAX_SECONDS))
+        next_parse_at = now + retry_after
         async with pool.connection() as conn:
             await conn.execute(
                 """
                 UPDATE messages
                 SET parse_attempts = parse_attempts + 1,
                     last_error = %s,
+                    next_parse_at = %s,
                     updated_at = %s
                 WHERE id = %s
                 """,
-                (str(error)[:1000], int(time.time()), msg_id),
+                (
+                    str(error)[:1000],
+                    next_parse_at,
+                    now,
+                    msg_id,
+                ),
             )
 
     @staticmethod
@@ -302,17 +321,27 @@ class Database:
                     SELECT
                         COUNT(*) FILTER (WHERE is_parsed = FALSE) AS unparsed,
                         COUNT(*) FILTER (WHERE is_parsed = FALSE AND parse_attempts > 0) AS retrying,
+                        COUNT(*) FILTER (
+                            WHERE is_parsed = FALSE
+                              AND parse_attempts > 0
+                              AND COALESCE(next_parse_at, 0) > EXTRACT(EPOCH FROM NOW())::BIGINT
+                        ) AS retry_delayed,
+                        COUNT(*) FILTER (
+                            WHERE is_parsed = FALSE
+                              AND parse_attempts >= %s
+                        ) AS retry_exhausted,
                         COUNT(*) FILTER (WHERE is_parsed = TRUE) AS parsed,
                         COALESCE(MAX(parse_attempts), 0) AS max_parse_attempts
                     FROM messages
-                    """
+                    """,
+                    (AI_MAX_PARSE_ATTEMPTS,),
                 )
                 row = await cur.fetchone()
 
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
-                    SELECT id, parse_attempts, last_error
+                    SELECT id, parse_attempts, next_parse_at, last_error
                     FROM messages
                     WHERE is_parsed = FALSE AND last_error IS NOT NULL
                     ORDER BY updated_at DESC
@@ -324,12 +353,15 @@ class Database:
         return {
             "unparsed": row["unparsed"] if row else 0,
             "retrying": row["retrying"] if row else 0,
+            "retry_delayed": row["retry_delayed"] if row else 0,
+            "retry_exhausted": row["retry_exhausted"] if row else 0,
             "parsed": row["parsed"] if row else 0,
             "max_parse_attempts": row["max_parse_attempts"] if row else 0,
             "recent_parse_errors": [
                 {
                     "id": item["id"],
                     "parse_attempts": item["parse_attempts"],
+                    "next_parse_at": item["next_parse_at"],
                     "last_error": item["last_error"],
                 }
                 for item in recent_errors

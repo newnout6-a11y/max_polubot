@@ -2,7 +2,7 @@ import logging
 import shlex
 import time
 
-from ai.parser import is_ai_available
+from ai.parser import AIProviderError, is_ai_available, parse_financial_message
 from core.config import COMMAND_PREFIX
 from core.session_probe import probe_session
 from core.settings import (
@@ -92,6 +92,8 @@ async def cmd_status(client, args, sender_id, context=None):
         f"- Pending MAX requests: {client_status.get('pending_requests', 0)}",
         f"- Unparsed messages: {db_stats.get('unparsed', 0)}",
         f"- Retrying parses: {db_stats.get('retrying', 0)}",
+        f"- Delayed retries: {db_stats.get('retry_delayed', 0)}",
+        f"- Exhausted retries: {db_stats.get('retry_exhausted', 0)}",
     ]
 
     last_error = client_status.get("last_error")
@@ -119,7 +121,16 @@ async def cmd_checks(client, args, sender_id, context=None):
     else:
         lines.append(f"- MAX session: FAIL ({result.error}: {result.message or ''})")
 
-    lines.append(f"- AI configured: {_yes_no(is_ai_available(settings))}")
+    if not is_ai_available(settings):
+        lines.append("- AI: \u043d\u0435\u0442 (API key is missing)")
+    else:
+        try:
+            await parse_financial_message("\u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 0", settings=settings)
+            lines.append("- AI request: OK")
+        except AIProviderError as exc:
+            lines.append(f"- AI request: FAIL ({exc})")
+        except Exception as exc:
+            lines.append(f"- AI request: FAIL ({exc})")
     await client.queue.put("\n".join(lines))
 
 
@@ -204,6 +215,10 @@ async def _apply_setting_side_effects(client, key, value):
         client.queue.min_delay = float(value)
     if key == "queue_max_delay":
         client.queue.max_delay = float(value)
+    if key == "queue_typing_chars_per_second":
+        client.queue.typing_chars_per_second = float(value)
+    if key == "queue_typing_max_delay":
+        client.queue.typing_max_delay = float(value)
 
     scheduler = getattr(client, "scheduler", None)
     if scheduler and key in {"report_day_of_week", "report_hour", "report_minute"}:

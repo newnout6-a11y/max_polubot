@@ -1,9 +1,16 @@
 import asyncio
 import logging
+import math
 import random
 from dataclasses import dataclass
 
-from core.config import QUEUE_PUT_TIMEOUT_SECONDS, QUEUE_RETRY_DELAY_SECONDS, QUEUE_SEND_RETRIES
+from core.config import (
+    QUEUE_PUT_TIMEOUT_SECONDS,
+    QUEUE_RETRY_DELAY_SECONDS,
+    QUEUE_SEND_RETRIES,
+    QUEUE_TYPING_CHARS_PER_SECOND,
+    QUEUE_TYPING_MAX_DELAY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -17,12 +24,22 @@ class QueuedMessage:
 class MessageQueue:
     """Rate-limited outgoing message queue with retry instead of silent drops."""
 
-    def __init__(self, send_func, min_delay=3.0, max_delay=7.0, max_size=100):
+    def __init__(
+        self,
+        send_func,
+        min_delay=3.0,
+        max_delay=7.0,
+        max_size=100,
+        typing_chars_per_second=QUEUE_TYPING_CHARS_PER_SECOND,
+        typing_max_delay=QUEUE_TYPING_MAX_DELAY,
+    ):
         self.queue = asyncio.Queue(maxsize=max_size)
         self.send_func = send_func
         self.min_delay = min_delay
         self.max_delay = max_delay
         self.max_size = max_size
+        self.typing_chars_per_second = typing_chars_per_second
+        self.typing_max_delay = typing_max_delay
         self._worker_task = None
 
     def start(self):
@@ -52,6 +69,13 @@ class MessageQueue:
             "worker_running": bool(self._worker_task and not self._worker_task.done()),
         }
 
+    def _typing_delay(self, text: str) -> float:
+        base = random.uniform(self.min_delay, self.max_delay)
+        typing_seconds = math.sqrt(max(len(text), 1)) / self.typing_chars_per_second
+        jitter = random.uniform(0.65, 1.35)
+        delay = base + (typing_seconds * jitter)
+        return min(delay, self.typing_max_delay)
+
     async def _requeue_or_drop(self, message: QueuedMessage, error: Exception):
         if message.attempts >= QUEUE_SEND_RETRIES:
             logger.error("Dropping message after %s retries: %s", message.attempts, error)
@@ -79,11 +103,7 @@ class MessageQueue:
                     )
                     await asyncio.sleep(30)
 
-                typing_delay = len(message.text) / 5.0 + random.uniform(
-                    self.min_delay,
-                    self.max_delay,
-                )
-                typing_delay = min(typing_delay, 15.0)
+                typing_delay = self._typing_delay(message.text)
 
                 logger.info("Typing delay: %.2fs...", typing_delay)
                 await asyncio.sleep(typing_delay)

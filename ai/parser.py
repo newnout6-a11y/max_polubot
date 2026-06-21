@@ -31,6 +31,17 @@ _gemini_client = None
 _gemini_key = None
 
 
+class AIProviderError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int | None = None, response_body: str = ""):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_body = response_body
+
+    @property
+    def is_config_error(self) -> bool:
+        return self.status_code is not None and 400 <= self.status_code < 500
+
+
 class Transaction(BaseModel):
     category: str = Field(description="Lowercase category or item name.")
     expense: int = Field(default=0, ge=0, description="Positive amount spent.")
@@ -123,6 +134,24 @@ def is_ai_available(settings=None) -> bool:
     return bool(config["api_key"])
 
 
+def _short_body(text: str, limit: int = 800) -> str:
+    compact = " ".join((text or "").split())
+    if len(compact) > limit:
+        return compact[:limit] + "..."
+    return compact
+
+
+def _raise_ai_status(response: httpx.Response, provider: str):
+    if response.status_code < 400:
+        return
+    body = _short_body(response.text)
+    raise AIProviderError(
+        f"{provider} API HTTP {response.status_code}: {body or response.reason_phrase}",
+        status_code=response.status_code,
+        response_body=body,
+    )
+
+
 def _prompt(text: str) -> str:
     return f"""
 You are a financial assistant reading messages from a team chat.
@@ -194,7 +223,7 @@ async def _parse_with_openai_compatible(text: str, api_key: str, model: str, bas
 
     async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT_SECONDS) as client:
         response = await client.post(url, headers=headers, json=payload)
-        response.raise_for_status()
+        _raise_ai_status(response, "chat_completions")
         data = response.json()
 
     content = data["choices"][0]["message"]["content"]
@@ -243,7 +272,7 @@ async def _parse_with_responses_api(
 
     async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT_SECONDS) as client:
         response = await client.post(url, headers=headers, json=payload)
-        response.raise_for_status()
+        _raise_ai_status(response, "responses")
         data = response.json()
 
     return ExtractionResult(**json.loads(_extract_response_text(data))).transactions
@@ -263,14 +292,28 @@ async def parse_financial_message(text: str, settings=None) -> List[Transaction]
             return await _parse_with_gemini(text, config["api_key"], config["model"])
 
         if config["wire_api"] == "responses":
-            return await _parse_with_responses_api(
-                text,
-                config["api_key"],
-                config["model"],
-                config["base_url"],
-                config["reasoning_effort"],
-                config["disable_response_storage"],
-            )
+            try:
+                return await _parse_with_responses_api(
+                    text,
+                    config["api_key"],
+                    config["model"],
+                    config["base_url"],
+                    config["reasoning_effort"],
+                    config["disable_response_storage"],
+                )
+            except AIProviderError as exc:
+                if exc.status_code == 400:
+                    logger.warning(
+                        "Responses API returned 400, falling back to chat_completions once: %s",
+                        exc,
+                    )
+                    return await _parse_with_openai_compatible(
+                        text,
+                        config["api_key"],
+                        config["model"],
+                        config["base_url"],
+                    )
+                raise
 
         return await _parse_with_openai_compatible(
             text,

@@ -94,6 +94,10 @@ AI_REQUEST_TIMEOUT_SECONDS = _float_env("AI_REQUEST_TIMEOUT_SECONDS", 45.0)
 AI_LOOP_INTERVAL_SECONDS = _float_env("AI_LOOP_INTERVAL_SECONDS", 15.0)
 AI_MESSAGE_DELAY_SECONDS = _float_env("AI_MESSAGE_DELAY_SECONDS", 3.0)
 AI_BATCH_LIMIT = _int_env("AI_BATCH_LIMIT", 20)
+AI_MAX_PARSE_ATTEMPTS = _int_env("AI_MAX_PARSE_ATTEMPTS", 5)
+AI_RETRY_BASE_SECONDS = _float_env("AI_RETRY_BASE_SECONDS", 60.0)
+AI_RETRY_MAX_SECONDS = _float_env("AI_RETRY_MAX_SECONDS", 3600.0)
+AI_CONFIG_ERROR_COOLDOWN_SECONDS = _float_env("AI_CONFIG_ERROR_COOLDOWN_SECONDS", 900.0)
 
 DATABASE_URL = _env("DATABASE_URL")
 NEON_DATABASE_URL = _env("NEON_DATABASE_URL")
@@ -134,6 +138,8 @@ COMMAND_ALIASES_ME = _csv_str_env(
 
 QUEUE_MIN_DELAY = _float_env("QUEUE_MIN_DELAY", 3.0)
 QUEUE_MAX_DELAY = _float_env("QUEUE_MAX_DELAY", 7.0)
+QUEUE_TYPING_CHARS_PER_SECOND = _float_env("QUEUE_TYPING_CHARS_PER_SECOND", 18.0)
+QUEUE_TYPING_MAX_DELAY = _float_env("QUEUE_TYPING_MAX_DELAY", 8.0)
 QUEUE_MAX_SIZE = _int_env("QUEUE_MAX_SIZE", 100)
 QUEUE_SEND_RETRIES = _int_env("QUEUE_SEND_RETRIES", 5)
 QUEUE_RETRY_DELAY_SECONDS = _float_env("QUEUE_RETRY_DELAY_SECONDS", 5.0)
@@ -193,12 +199,24 @@ def validate_startup_config() -> StartupValidation:
         errors.append("AI_PROVIDER must be one of: gemini, openai, deepseek")
     if QUEUE_MIN_DELAY > QUEUE_MAX_DELAY:
         errors.append("QUEUE_MIN_DELAY must be less than or equal to QUEUE_MAX_DELAY")
+    if QUEUE_TYPING_CHARS_PER_SECOND <= 0:
+        errors.append("QUEUE_TYPING_CHARS_PER_SECOND must be positive")
+    if QUEUE_TYPING_MAX_DELAY < 0:
+        errors.append("QUEUE_TYPING_MAX_DELAY cannot be negative")
     if DB_POOL_MIN_SIZE > DB_POOL_MAX_SIZE:
         errors.append("DB_POOL_MIN_SIZE must be less than or equal to DB_POOL_MAX_SIZE")
     if not COMMAND_PREFIX:
         errors.append("COMMAND_PREFIX cannot be empty")
     if AI_BATCH_LIMIT <= 0:
         errors.append("AI_BATCH_LIMIT must be positive")
+    if AI_MAX_PARSE_ATTEMPTS <= 0:
+        errors.append("AI_MAX_PARSE_ATTEMPTS must be positive")
+    if AI_RETRY_BASE_SECONDS <= 0:
+        errors.append("AI_RETRY_BASE_SECONDS must be positive")
+    if AI_RETRY_MAX_SECONDS < AI_RETRY_BASE_SECONDS:
+        errors.append("AI_RETRY_MAX_SECONDS must be greater than or equal to AI_RETRY_BASE_SECONDS")
+    if AI_CONFIG_ERROR_COOLDOWN_SECONDS <= 0:
+        errors.append("AI_CONFIG_ERROR_COOLDOWN_SECONDS must be positive")
     if QUEUE_MAX_SIZE <= 0:
         errors.append("QUEUE_MAX_SIZE must be positive")
     if QUEUE_SEND_RETRIES < 0:

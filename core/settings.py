@@ -149,6 +149,18 @@ SETTINGS = {
         default=7.0,
         description="Maximum delay before sending queued messages.",
     ),
+    "queue_typing_chars_per_second": SettingSpec(
+        key="queue_typing_chars_per_second",
+        value_type=float,
+        default=18.0,
+        description="Controls synthetic typing delay. Higher means faster replies.",
+    ),
+    "queue_typing_max_delay": SettingSpec(
+        key="queue_typing_max_delay",
+        value_type=float,
+        default=8.0,
+        description="Hard cap for synthetic typing delay.",
+    ),
 }
 
 
@@ -236,6 +248,10 @@ def validate_setting(key: str, value):
         raise ValueError("queue_min_delay cannot be negative")
     if key == "queue_max_delay" and float(value) < 0:
         raise ValueError("queue_max_delay cannot be negative")
+    if key == "queue_typing_chars_per_second" and float(value) <= 0:
+        raise ValueError("queue_typing_chars_per_second must be positive")
+    if key == "queue_typing_max_delay" and float(value) < 0:
+        raise ValueError("queue_typing_max_delay cannot be negative")
 
 
 def mask_value(value) -> str:

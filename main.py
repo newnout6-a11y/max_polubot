@@ -11,8 +11,10 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from ai.parser import is_ai_available, parse_financial_message
+from ai.parser import AIProviderError
 from core.client import MaxWebsocketClient, SessionAuthError
 from core.config import (
+    AI_CONFIG_ERROR_COOLDOWN_SECONDS,
     ADMIN_IDS,
     AI_BATCH_LIMIT,
     AI_LOOP_INTERVAL_SECONDS,
@@ -42,6 +44,8 @@ from core.config import (
     QUEUE_MAX_DELAY,
     QUEUE_MAX_SIZE,
     QUEUE_MIN_DELAY,
+    QUEUE_TYPING_CHARS_PER_SECOND,
+    QUEUE_TYPING_MAX_DELAY,
     READINESS_MAX_DISCONNECTED_SECONDS,
     REPORT_DAY_OF_WEEK,
     REPORT_HOUR,
@@ -77,6 +81,7 @@ runtime = {
     "session_source": None,
     "settings": None,
     "last_checks": {},
+    "ai_paused_until": 0,
     "shutting_down": False,
 }
 
@@ -231,9 +236,13 @@ async def background_ai_processor():
             if not is_ai_available(settings):
                 runtime["last_checks"]["ai"] = {
                     "ok": False,
-                    "message": "GEMINI_API_KEY is missing or client failed to initialize",
+                    "message": "AI API key is missing for selected provider",
                     "checked_at": _now(),
                 }
+                await asyncio.sleep(AI_LOOP_INTERVAL_SECONDS)
+                continue
+
+            if runtime.get("ai_paused_until", 0) > _now():
                 await asyncio.sleep(AI_LOOP_INTERVAL_SECONDS)
                 continue
 
@@ -249,6 +258,18 @@ async def background_ai_processor():
                     transactions = await parse_financial_message(text, settings=settings)
                     await Database.replace_finances(msg_id, transactions, ts)
                     logger.info("Parsed %s transactions for message %s", len(transactions), msg_id)
+                except AIProviderError as exc:
+                    cooldown = AI_CONFIG_ERROR_COOLDOWN_SECONDS if exc.is_config_error else None
+                    await Database.mark_parse_failed(msg_id, exc, retry_after_seconds=cooldown)
+                    if exc.is_config_error:
+                        runtime["ai_paused_until"] = _now() + int(AI_CONFIG_ERROR_COOLDOWN_SECONDS)
+                        runtime["last_checks"]["ai"] = {
+                            "ok": False,
+                            "message": str(exc),
+                            "paused_until": runtime["ai_paused_until"],
+                            "checked_at": _now(),
+                        }
+                    logger.error("Failed to parse %s, AI cooldown=%s: %s", msg_id, cooldown, exc)
                 except Exception as exc:
                     await Database.mark_parse_failed(msg_id, exc)
                     logger.error("Failed to parse %s, will retry later: %s", msg_id, exc)
@@ -352,6 +373,8 @@ def default_runtime_settings():
         "report_minute": REPORT_MINUTE,
         "queue_min_delay": QUEUE_MIN_DELAY,
         "queue_max_delay": QUEUE_MAX_DELAY,
+        "queue_typing_chars_per_second": QUEUE_TYPING_CHARS_PER_SECOND,
+        "queue_typing_max_delay": QUEUE_TYPING_MAX_DELAY,
     }
 
 
@@ -399,6 +422,8 @@ async def main():
         min_delay=settings.get("queue_min_delay"),
         max_delay=settings.get("queue_max_delay"),
         max_size=QUEUE_MAX_SIZE,
+        typing_chars_per_second=settings.get("queue_typing_chars_per_second"),
+        typing_max_delay=settings.get("queue_typing_max_delay"),
     )
     client.queue = queue
     runtime["queue"] = queue
