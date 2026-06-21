@@ -26,6 +26,14 @@ async def main():
     work_dir = os.path.abspath(".max_session")
     os.makedirs(work_dir, exist_ok=True)
     
+    # Удаляем старую сессию, чтобы гарантированно запросить новый SMS-код
+    session_db = os.path.join(work_dir, "session.db")
+    if os.path.exists(session_db):
+        try:
+            os.remove(session_db)
+        except Exception:
+            pass
+    
     client = Client(
         phone=phone,
         work_dir=work_dir,
