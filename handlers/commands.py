@@ -2,7 +2,7 @@ import logging
 import shlex
 import time
 
-from ai.parser import AIProviderError, is_ai_available, parse_financial_message
+from ai.parser import AIProviderError, ask_ai, is_ai_available, parse_financial_message
 from core.config import COMMAND_PREFIX
 from core.session_probe import probe_session
 from core.settings import (
@@ -65,6 +65,88 @@ async def cmd_stata(client, args, sender_id, context=None):
         ]
     )
     await client.queue.put("\n".join(lines))
+
+
+async def _parse_finance_period(args: str) -> tuple[int, str]:
+    period, title = _parse_stats_period(args)
+    return period, title
+
+
+async def cmd_parse_finance(client, args, sender_id, context=None):
+    settings = getattr(client, "runtime_settings", None)
+    if not is_ai_available(settings):
+        await client.queue.put("AI API key is not configured.")
+        return
+
+    period, title = await _parse_finance_period(args)
+    start_ts = int(time.time()) - (period * 24 * 60 * 60)
+    target_chat_id = int(getattr(client, "target_chat_id", 0) or 0)
+    if not target_chat_id:
+        await client.queue.put(
+            f"\u0421\u043d\u0430\u0447\u0430\u043b\u0430 \u0437\u0430\u0434\u0430\u0439 target_chat_id: "
+            f"{COMMAND_PREFIX}\u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 target_chat_id here"
+        )
+        return
+
+    normalized_args = (args or "").strip().lower()
+    reparse_all = any(
+        token in normalized_args.split()
+        for token in {"all", "reparse", "\u0432\u0441\u0435", "\u0432\u0441\u0451", "\u0437\u0430\u043d\u043e\u0432\u043e"}
+    )
+    rows = await Database.get_messages_for_period(
+        start_ts,
+        chat_id=target_chat_id,
+        limit=500,
+        only_unparsed=not reparse_all,
+    )
+    if not rows:
+        if reparse_all:
+            await client.queue.put(f"\u0417\u0430 {title} \u043d\u0435\u0442 \u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d\u043d\u044b\u0445 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439.")
+        else:
+            await client.queue.put(
+                f"\u0417\u0430 {title} \u043d\u0435\u0442 \u043d\u043e\u0432\u044b\u0445 \u043d\u0435\u0440\u0430\u0437\u043e\u0431\u0440\u0430\u043d\u043d\u044b\u0445 "
+                f"\u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439. \u0414\u043b\u044f \u043f\u043e\u0432\u0442\u043e\u0440\u043d\u043e\u0433\u043e "
+                f"\u0440\u0430\u0437\u0431\u043e\u0440\u0430: {COMMAND_PREFIX}\u0440\u0430\u0437\u043e\u0431\u0440\u0430\u0442\u044c {title} all"
+            )
+        return
+
+    parsed_count = 0
+    tx_count = 0
+    errors = []
+    for row in rows:
+        try:
+            transactions = await parse_financial_message(row["text"], settings=settings)
+            await Database.replace_finances(row["id"], transactions, row["timestamp"])
+            parsed_count += 1
+            tx_count += len(transactions)
+        except Exception as exc:
+            await Database.mark_parse_failed(row["id"], exc)
+            errors.append(str(exc))
+            if len(errors) >= 3:
+                break
+
+    lines = [
+        f"\u0420\u0430\u0437\u0431\u043e\u0440 \u0437\u0430 {title} \u0433\u043e\u0442\u043e\u0432.",
+        f"- \u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439: {parsed_count}/{len(rows)}",
+        f"- \u0422\u0440\u0430\u043d\u0437\u0430\u043a\u0446\u0438\u0439: {tx_count}",
+    ]
+    if errors:
+        lines.append(f"- \u041e\u0448\u0438\u0431\u043a\u0430 AI: {errors[0]}")
+    await client.queue.put("\n".join(lines))
+
+
+async def cmd_ask_ai(client, args, sender_id, context=None):
+    question = (args or "").strip()
+    if not question:
+        await client.queue.put(f"\u0424\u043e\u0440\u043c\u0430\u0442: {COMMAND_PREFIX}ai \u0442\u0432\u043e\u0439 \u0432\u043e\u043f\u0440\u043e\u0441")
+        return
+    settings = getattr(client, "runtime_settings", None)
+    try:
+        answer = await ask_ai(question, settings=settings)
+    except Exception as exc:
+        await client.queue.put(f"AI error: {exc}")
+        return
+    await client.queue.put(answer or "<empty AI response>")
 
 
 async def cmd_status(client, args, sender_id, context=None):
@@ -253,6 +335,9 @@ async def cmd_help(client, args, sender_id, context=None):
     text = (
         "\u041a\u043e\u043c\u0430\u043d\u0434\u044b MAX Polubot:\n"
         f"- {prefix}\u0441\u0442\u0430\u0442\u0430 - \u0441\u0432\u043e\u0434\u043a\u0430 \u0437\u0430 7 \u0434\u043d\u0435\u0439\n"
+        f"- {prefix}\u0440\u0430\u0437\u043e\u0431\u0440\u0430\u0442\u044c \u043d\u0435\u0434\u0435\u043b\u044f - AI-\u0440\u0430\u0437\u0431\u043e\u0440 \u043d\u043e\u0432\u044b\u0445 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439\n"
+        f"- {prefix}\u0440\u0430\u0437\u043e\u0431\u0440\u0430\u0442\u044c \u043d\u0435\u0434\u0435\u043b\u044f all - \u043f\u043e\u0432\u0442\u043e\u0440\u043d\u044b\u0439 \u0440\u0430\u0437\u0431\u043e\u0440 \u0432\u0441\u0435\u0445 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439\n"
+        f"- {prefix}ai \u0432\u043e\u043f\u0440\u043e\u0441 - \u0441\u043f\u0440\u043e\u0441\u0438\u0442\u044c AI\n"
         f"- {prefix}\u0441\u0442\u0430\u0442\u0430 \u043c\u0435\u0441\u044f\u0446 - \u0441\u0432\u043e\u0434\u043a\u0430 \u0437\u0430 30 \u0434\u043d\u0435\u0439\n"
         f"- {prefix}\u0441\u0442\u0430\u0442\u0443\u0441 - \u0431\u044b\u0441\u0442\u0440\u044b\u0439 \u0441\u0442\u0430\u0442\u0443\u0441\n"
         f"- {prefix}\u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 - \u0430\u043a\u0442\u0438\u0432\u043d\u044b\u0435 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438\n"

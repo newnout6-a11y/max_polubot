@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from typing import List
 
 import httpx
@@ -58,6 +59,13 @@ class Transaction(BaseModel):
 
 class ExtractionResult(BaseModel):
     transactions: List[Transaction] = Field(default_factory=list)
+
+
+FINANCE_INSTRUCTIONS = "Return only valid JSON."
+GENERAL_AI_INSTRUCTIONS = (
+    "You are a helpful assistant inside a MAX chat bot. "
+    "Answer concisely, in Russian by default, unless the user asks otherwise."
+)
 
 
 def _setting(settings, key, default):
@@ -153,21 +161,20 @@ def _raise_ai_status(response: httpx.Response, provider: str):
 
 
 def _prompt(text: str) -> str:
-    return f"""
-You are a financial assistant reading messages from a team chat.
-Extract financial transactions from the message.
+    return (
+        "Верни только JSON. Извлеки финансовые операции из сообщения чата. "
+        "Схема ответа: "
+        '{"transactions":[{"category":"string","expense":0,"income":0}]}. '
+        'Если в сообщении нет расхода или дохода, верни {"transactions":[]}. '
+        "Расход: купил, потратил, оплатил, списали, минус, spent, paid. "
+        "Доход: получил, доход, зарплата, плюс, зачислили, received. "
+        "Не придумывай суммы. Сообщение: "
+        f"{json.dumps(text, ensure_ascii=False)}"
+    )
 
-Rules:
-- Return JSON only: {{"transactions":[{{"category":"...", "expense":0, "income":0}}]}}
-- Return an empty transactions list when there are no expenses or incomes.
-- Negative numbers, "spent", "paid", "купил", "потратил", "минус" are expenses.
-- Received money, "получил", "доход", "плюс", "зачислили" are incomes.
-- Keep category short, lowercase and human-readable.
-- Do not invent values that are not present in the message.
 
-Message:
-{json.dumps(text, ensure_ascii=False)}
-"""
+def _plain_prompt(text: str) -> str:
+    return text.strip()
 
 
 async def _parse_with_gemini(text: str, api_key: str, model: str) -> List[Transaction]:
@@ -202,7 +209,14 @@ async def _parse_with_gemini(text: str, api_key: str, model: str) -> List[Transa
     return ExtractionResult(**data).transactions
 
 
-async def _parse_with_openai_compatible(text: str, api_key: str, model: str, base_url: str):
+async def _chat_completions_request(
+    prompt: str,
+    api_key: str,
+    model: str,
+    base_url: str,
+    instructions: str,
+    json_mode: bool = False,
+):
     url = base_url.rstrip("/") + "/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -213,21 +227,33 @@ async def _parse_with_openai_compatible(text: str, api_key: str, model: str, bas
         "messages": [
             {
                 "role": "system",
-                "content": "Extract financial transactions and return strict JSON.",
+                "content": instructions,
             },
-            {"role": "user", "content": _prompt(text)},
+            {"role": "user", "content": prompt},
         ],
         "temperature": 0,
-        "response_format": {"type": "json_object"},
     }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
 
     async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT_SECONDS) as client:
         response = await client.post(url, headers=headers, json=payload)
         _raise_ai_status(response, "chat_completions")
         data = response.json()
 
-    content = data["choices"][0]["message"]["content"]
-    return ExtractionResult(**json.loads(content)).transactions
+    return data["choices"][0]["message"]["content"]
+
+
+async def _parse_with_openai_compatible(text: str, api_key: str, model: str, base_url: str):
+    content = await _chat_completions_request(
+        _prompt(text),
+        api_key,
+        model,
+        base_url,
+        FINANCE_INSTRUCTIONS,
+        json_mode=True,
+    )
+    return ExtractionResult(**_loads_json_object(content)).transactions
 
 
 def _extract_response_text(data: dict) -> str:
@@ -240,13 +266,26 @@ def _extract_response_text(data: dict) -> str:
     raise RuntimeError("Responses API returned no output text")
 
 
+def _loads_json_object(text: str) -> dict:
+    value = (text or "").strip()
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        match = re.search(r"\{[\s\S]*\}", value)
+        if not match:
+            raise
+        return json.loads(match.group(0))
+
+
 async def _parse_with_responses_api(
-    text: str,
+    prompt: str,
     api_key: str,
     model: str,
     base_url: str,
     reasoning_effort: str,
     disable_response_storage: bool,
+    instructions: str,
+    json_mode: bool = False,
 ):
     url = base_url.rstrip("/") + "/responses"
     headers = {
@@ -255,15 +294,13 @@ async def _parse_with_responses_api(
     }
     payload = {
         "model": model,
+        "instructions": instructions,
         "input": [
-            {
-                "role": "system",
-                "content": "Extract financial transactions and return strict JSON.",
-            },
-            {"role": "user", "content": _prompt(text)},
+            {"role": "user", "content": prompt},
         ],
-        "text": {"format": {"type": "json_object"}},
     }
+    if json_mode:
+        payload["text"] = {"format": {"type": "json_object"}}
 
     if reasoning_effort:
         payload["reasoning"] = {"effort": reasoning_effort}
@@ -275,7 +312,7 @@ async def _parse_with_responses_api(
         _raise_ai_status(response, "responses")
         data = response.json()
 
-    return ExtractionResult(**json.loads(_extract_response_text(data))).transactions
+    return _extract_response_text(data)
 
 
 async def parse_financial_message(text: str, settings=None) -> List[Transaction]:
@@ -293,18 +330,21 @@ async def parse_financial_message(text: str, settings=None) -> List[Transaction]
 
         if config["wire_api"] == "responses":
             try:
-                return await _parse_with_responses_api(
-                    text,
+                content = await _parse_with_responses_api(
+                    _prompt(text),
                     config["api_key"],
                     config["model"],
                     config["base_url"],
                     config["reasoning_effort"],
                     config["disable_response_storage"],
+                    FINANCE_INSTRUCTIONS,
+                    json_mode=False,
                 )
+                return ExtractionResult(**_loads_json_object(content)).transactions
             except AIProviderError as exc:
-                if exc.status_code == 400:
+                if exc.status_code == 400 or (exc.status_code and exc.status_code >= 500):
                     logger.warning(
-                        "Responses API returned 400, falling back to chat_completions once: %s",
+                        "Responses API failed, falling back to chat_completions once: %s",
                         exc,
                     )
                     return await _parse_with_openai_compatible(
@@ -324,3 +364,68 @@ async def parse_financial_message(text: str, settings=None) -> List[Transaction]
     except Exception as exc:
         logger.error("AI API error provider=%s: %s", config["provider"], exc)
         raise
+
+
+async def ask_ai(question: str, settings=None) -> str:
+    config = _provider_config(settings)
+    if not config["api_key"]:
+        raise RuntimeError(f"{config['provider']} API key is not configured.")
+
+    prompt = _plain_prompt(question)
+    if not prompt:
+        raise ValueError("Question cannot be empty")
+
+    if config["provider"] == "gemini":
+        client = _get_gemini_client(config["api_key"])
+        if not client:
+            raise RuntimeError("Gemini API client is not initialized.")
+        loop = asyncio.get_running_loop()
+
+        def run_sync():
+            return client.models.generate_content(
+                model=config["model"],
+                contents=f"{GENERAL_AI_INSTRUCTIONS}\n\nUser question:\n{prompt}",
+            )
+
+        response = await asyncio.wait_for(
+            loop.run_in_executor(None, run_sync),
+            timeout=AI_REQUEST_TIMEOUT_SECONDS,
+        )
+        return (response.text or "").strip()
+
+    if config["wire_api"] == "responses":
+        try:
+            return await _parse_with_responses_api(
+                prompt,
+                config["api_key"],
+                config["model"],
+                config["base_url"],
+                config["reasoning_effort"],
+                config["disable_response_storage"],
+                GENERAL_AI_INSTRUCTIONS,
+                json_mode=False,
+            )
+        except AIProviderError as exc:
+            if exc.status_code and exc.status_code >= 500:
+                logger.warning(
+                    "Responses API failed for general AI, falling back to chat_completions: %s",
+                    exc,
+                )
+                return await _chat_completions_request(
+                    prompt,
+                    config["api_key"],
+                    config["model"],
+                    config["base_url"],
+                    GENERAL_AI_INSTRUCTIONS,
+                    json_mode=False,
+                )
+            raise
+
+    return await _chat_completions_request(
+        prompt,
+        config["api_key"],
+        config["model"],
+        config["base_url"],
+        GENERAL_AI_INSTRUCTIONS,
+        json_mode=False,
+    )

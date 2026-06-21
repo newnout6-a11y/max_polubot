@@ -78,6 +78,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS messages (
                     id TEXT PRIMARY KEY,
                     text TEXT NOT NULL,
+                    chat_id BIGINT,
                     sender_id BIGINT,
                     timestamp BIGINT NOT NULL,
                     is_parsed BOOLEAN DEFAULT FALSE,
@@ -92,6 +93,7 @@ class Database:
             await conn.execute(
                 """
                 ALTER TABLE messages
+                    ADD COLUMN IF NOT EXISTS chat_id BIGINT,
                     ADD COLUMN IF NOT EXISTS parse_attempts INTEGER DEFAULT 0,
                     ADD COLUMN IF NOT EXISTS next_parse_at BIGINT DEFAULT 0,
                     ADD COLUMN IF NOT EXISTS last_error TEXT,
@@ -146,23 +148,58 @@ class Database:
                 return bool(row and row["ok"] == 1)
 
     @staticmethod
-    async def save_message(msg_id, text, sender_id, timestamp):
+    async def save_message(msg_id, text, sender_id, timestamp, chat_id=None):
         pool = Database._require_pool()
         normalized_ts = normalize_unix_timestamp(timestamp)
         async with pool.connection() as conn:
             await conn.execute(
                 """
-                INSERT INTO messages (id, text, sender_id, timestamp, updated_at)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO messages (id, text, chat_id, sender_id, timestamp, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO UPDATE SET
                     text = EXCLUDED.text,
+                    chat_id = EXCLUDED.chat_id,
                     sender_id = EXCLUDED.sender_id,
                     timestamp = EXCLUDED.timestamp,
                     updated_at = EXCLUDED.updated_at
                 WHERE messages.is_parsed = FALSE
                 """,
-                (msg_id, text, sender_id, normalized_ts, int(time.time())),
+                (msg_id, text, chat_id, sender_id, normalized_ts, int(time.time())),
             )
+
+    @staticmethod
+    async def get_messages_for_period(
+        start_timestamp,
+        end_timestamp=None,
+        chat_id=None,
+        limit=500,
+        only_unparsed=False,
+    ):
+        pool = Database._require_pool()
+        normalized_start = normalize_unix_timestamp(start_timestamp)
+        normalized_end = normalize_unix_timestamp(end_timestamp or int(time.time()))
+        clauses = ["timestamp >= %s", "timestamp <= %s"]
+        params = [normalized_start, normalized_end]
+        if chat_id:
+            clauses.append("chat_id = %s")
+            params.append(int(chat_id))
+        if only_unparsed:
+            clauses.append("is_parsed = FALSE")
+        params.append(limit)
+
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"""
+                    SELECT *
+                    FROM messages
+                    WHERE {" AND ".join(clauses)}
+                    ORDER BY timestamp ASC
+                    LIMIT %s
+                    """,
+                    tuple(params),
+                )
+                return await cur.fetchall()
 
     @staticmethod
     async def get_unparsed_messages(limit=20):

@@ -14,6 +14,7 @@ from ai.parser import is_ai_available, parse_financial_message
 from ai.parser import AIProviderError
 from core.client import MaxWebsocketClient, SessionAuthError
 from core.config import (
+    AI_BACKGROUND_PROCESSING,
     AI_CONFIG_ERROR_COOLDOWN_SECONDS,
     ADMIN_IDS,
     AI_BATCH_LIMIT,
@@ -22,8 +23,10 @@ from core.config import (
     COMMAND_ALIASES_CHECKS,
     COMMAND_ALIASES_CHAT,
     COMMAND_ALIASES_CLEAR_AI,
+    COMMAND_ALIASES_ASK_AI,
     COMMAND_ALIASES_HELP,
     COMMAND_ALIASES_ME,
+    COMMAND_ALIASES_PARSE_FINANCE,
     COMMAND_ALIASES_PING,
     COMMAND_ALIASES_SETUP,
     COMMAND_ALIASES_STATS,
@@ -69,9 +72,11 @@ from handlers.commands import (
     cmd_chat,
     cmd_checks,
     cmd_clear_pending,
+    cmd_ask_ai,
     cmd_help,
     cmd_me,
     cmd_ping,
+    cmd_parse_finance,
     cmd_setup,
     cmd_stata,
     cmd_status,
@@ -241,6 +246,10 @@ async def run_startup_session_check(device_id, token) -> bool:
 
 async def background_ai_processor():
     """Parse stored messages in small batches without blocking the WebSocket listener."""
+    if not AI_BACKGROUND_PROCESSING:
+        logger.info("Background AI parsing is disabled; use parse command to process saved messages.")
+        return
+
     while True:
         try:
             settings = runtime.get("settings")
@@ -339,8 +348,13 @@ async def cron_weekly_report(queue):
     class DummyClient:
         def __init__(self, message_queue):
             self.queue = message_queue
+            self.runtime_settings = runtime.get("settings")
+            client = runtime.get("client")
+            self.target_chat_id = getattr(client, "target_chat_id", 0) if client else 0
 
-    await cmd_stata(DummyClient(queue), "", 0)
+    dummy = DummyClient(queue)
+    await cmd_parse_finance(dummy, "\u043d\u0435\u0434\u0435\u043b\u044f", 0)
+    await cmd_stata(dummy, "", 0)
 
 
 def register_commands(dispatcher: Dispatcher):
@@ -348,6 +362,10 @@ def register_commands(dispatcher: Dispatcher):
         dispatcher.register_command(alias, cmd_ping)
     for alias in COMMAND_ALIASES_STATS:
         dispatcher.register_command(alias, cmd_stata)
+    for alias in COMMAND_ALIASES_PARSE_FINANCE:
+        dispatcher.register_command(alias, cmd_parse_finance)
+    for alias in COMMAND_ALIASES_ASK_AI:
+        dispatcher.register_command(alias, cmd_ask_ai)
     for alias in COMMAND_ALIASES_HELP:
         dispatcher.register_command(alias, cmd_help)
     for alias in COMMAND_ALIASES_STATUS:
