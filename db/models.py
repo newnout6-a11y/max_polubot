@@ -1,5 +1,6 @@
-import asyncpg
 import logging
+from psycopg_pool import AsyncConnectionPool
+from psycopg.rows import dict_row
 from core.config import DATABASE_URL
 
 logger = logging.getLogger(__name__)
@@ -13,10 +14,16 @@ class Database:
             logger.critical("DATABASE_URL is not set!")
             raise ValueError("DATABASE_URL is not set in environment variables")
             
-        logger.info("Initializing PostgreSQL Connection Pool...")
-        Database.pool = await asyncpg.create_pool(DATABASE_URL)
+        logger.info("Initializing PostgreSQL Connection Pool (psycopg3)...")
+        # Инициализируем пул подключений с фабрикой строк dict_row для доступа row['field']
+        Database.pool = AsyncConnectionPool(
+            conninfo=DATABASE_URL,
+            open=False,
+            kwargs={"row_factory": dict_row}
+        )
+        await Database.pool.open()
         
-        async with Database.pool.acquire() as conn:
+        async with Database.pool.connection() as conn:
             # Инициализация таблиц
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
@@ -41,47 +48,52 @@ class Database:
 
     @staticmethod
     async def save_message(msg_id, text, sender_id, timestamp):
-        async with Database.pool.acquire() as conn:
+        async with Database.pool.connection() as conn:
             await conn.execute("""
                 INSERT INTO messages (id, text, sender_id, timestamp) 
-                VALUES ($1, $2, $3, $4) 
+                VALUES (%s, %s, %s, %s) 
                 ON CONFLICT (id) DO NOTHING
-            """, msg_id, text, sender_id, timestamp)
+            """, (msg_id, text, sender_id, timestamp))
 
     @staticmethod
     async def get_unparsed_messages():
-        async with Database.pool.acquire() as conn:
-            # Возвращает список объектов Record, поддерживающих доступ по ключам
-            return await conn.fetch("SELECT * FROM messages WHERE is_parsed = FALSE")
+        async with Database.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT * FROM messages WHERE is_parsed = FALSE")
+                return await cur.fetchall()
 
     @staticmethod
     async def mark_parsed(msg_id):
-        async with Database.pool.acquire() as conn:
-            await conn.execute("UPDATE messages SET is_parsed = TRUE WHERE id = $1", msg_id)
+        async with Database.pool.connection() as conn:
+            await conn.execute("UPDATE messages SET is_parsed = TRUE WHERE id = %s", (msg_id,))
 
     @staticmethod
     async def save_finance(message_id, category, expense, income, date):
-        async with Database.pool.acquire() as conn:
+        async with Database.pool.connection() as conn:
             await conn.execute("""
                 INSERT INTO finances (message_id, category, expense, income, date) 
-                VALUES ($1, $2, $3, $4, $5)
-            """, message_id, category, expense, income, date)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (message_id, category, expense, income, date))
 
     @staticmethod
     async def get_stats(start_timestamp):
-        async with Database.pool.acquire() as conn:
-            stats = await conn.fetch("""
-                SELECT category, SUM(expense) as total_expense, SUM(income) as total_income 
-                FROM finances 
-                WHERE date >= $1 
-                GROUP BY category
-            """, start_timestamp)
+        async with Database.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("""
+                    SELECT category, SUM(expense) as total_expense, SUM(income) as total_income 
+                    FROM finances 
+                    WHERE date >= %s 
+                    GROUP BY category
+                """, (start_timestamp,))
+                stats = await cur.fetchall()
             
-            row = await conn.fetchrow("""
-                SELECT SUM(expense) as exp, SUM(income) as inc 
-                FROM finances 
-                WHERE date >= $1
-            """, start_timestamp)
+            async with conn.cursor() as cur:
+                await cur.execute("""
+                    SELECT SUM(expense) as exp, SUM(income) as inc 
+                    FROM finances 
+                    WHERE date >= %s
+                """, (start_timestamp,))
+                row = await cur.fetchone()
             
             exp = 0
             inc = 0
