@@ -1,0 +1,121 @@
+import asyncio
+import logging
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+import time
+
+from database import (
+    init_db, save_message, get_unparsed_messages, mark_parsed, 
+    save_finance, get_weekly_stats, get_totals
+)
+from ai_parser import parse_financial_message
+from max_stealth_client import MaxStealthClient
+
+# Configure your target group chat ID here
+TARGET_CHAT_ID = -1000000000 # Replace with actual chat ID
+REPORT_DAY_OF_WEEK = "fri"
+REPORT_HOUR = 18
+REPORT_MINUTE = 0
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+async def process_unparsed_messages():
+    """Background task to send unparsed messages to AI and save results."""
+    while True:
+        try:
+            unparsed = await get_unparsed_messages()
+            for row in unparsed:
+                msg_id = row['id']
+                text = row['text']
+                ts = row['timestamp']
+                
+                logger.info(f"Parsing message {msg_id} with AI...")
+                transactions = parse_financial_message(text)
+                
+                for t in transactions:
+                    await save_finance(msg_id, t.category, t.expense, t.income, ts)
+                    logger.info(f"Saved tx: {t.category} | Exp: {t.expense} | Inc: {t.income}")
+                    
+                await mark_parsed(msg_id)
+                
+                # Avoid rate limiting with AI API
+                await asyncio.sleep(2)
+        except Exception as e:
+            logger.error(f"Error in AI processor loop: {e}")
+            
+        await asyncio.sleep(10) # Check every 10 seconds
+
+async def generate_and_send_report(client: MaxStealthClient):
+    """Generates the weekly report and sends it to the chat."""
+    logger.info("Generating weekly financial report...")
+    
+    # 7 days ago
+    start_ts = int(time.time()) - (7 * 24 * 60 * 60)
+    
+    stats = await get_weekly_stats(start_ts)
+    total_exp, total_inc = await get_totals(start_ts)
+    
+    if not stats and total_exp == 0 and total_inc == 0:
+        logger.info("No stats for this week.")
+        return
+        
+    report = "📊 **Еженедельный финансовый отчет**\n\n"
+    report += "Категории:\n"
+    
+    for row in stats:
+        cat = row['category'].capitalize()
+        exp = row['total_expense']
+        inc = row['total_income']
+        
+        line = f"• {cat}:"
+        if exp > 0:
+            line += f" 🔻{exp}"
+        if inc > 0:
+            line += f" 🍏{inc}"
+        report += line + "\n"
+        
+    report += "\n"
+    report += f"📉 Всего потрачено: {total_exp}\n"
+    report += f"📈 Всего получено: {total_inc}\n"
+    report += f"⚖️ Дельта: {total_inc - total_exp}\n"
+    
+    await client.send_message(report)
+
+async def on_new_message(msg_id, text, sender_id, timestamp):
+    """Callback triggered by MaxStealthClient on new messages."""
+    await save_message(msg_id, text, sender_id, timestamp)
+    logger.info(f"Saved message {msg_id} to DB")
+
+async def main():
+    logger.info("Starting MAX Polubot...")
+    
+    # Init SQLite DB
+    await init_db()
+    
+    # Init Max Client
+    client = MaxStealthClient(
+        target_chat_id=TARGET_CHAT_ID,
+        on_message_callback=on_new_message
+    )
+    
+    # Init Scheduler for weekly reports
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(
+        generate_and_send_report, 
+        CronTrigger(day_of_week=REPORT_DAY_OF_WEEK, hour=REPORT_HOUR, minute=REPORT_MINUTE),
+        args=[client]
+    )
+    scheduler.start()
+    
+    # Start background AI processor
+    asyncio.create_task(process_unparsed_messages())
+    
+    # Start Max WebSocket client (blocks)
+    await client.connect_and_listen()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
