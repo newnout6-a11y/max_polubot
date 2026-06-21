@@ -326,6 +326,7 @@ async def _parse_with_responses_api(
     json_mode: bool = False,
 ):
     url = base_url.rstrip("/") + "/responses"
+    is_byesu = _is_byesu_base_url(base_url)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -340,9 +341,9 @@ async def _parse_with_responses_api(
     if json_mode:
         payload["text"] = {"format": {"type": "json_object"}}
 
-    if reasoning_effort:
+    if reasoning_effort and not is_byesu:
         payload["reasoning"] = {"effort": reasoning_effort}
-    if disable_response_storage:
+    if disable_response_storage and not is_byesu:
         payload["store"] = False
 
     async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT_SECONDS) as client:
@@ -376,7 +377,7 @@ async def parse_financial_message(text: str, settings=None) -> List[Transaction]
                     config["reasoning_effort"],
                     config["disable_response_storage"],
                     FINANCE_INSTRUCTIONS,
-                    json_mode=False,
+                    json_mode=True,
                 )
                 return ExtractionResult(**_loads_json_object(content)).transactions
             except AIProviderError as exc:
