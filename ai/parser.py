@@ -331,14 +331,21 @@ async def _parse_with_responses_api(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "model": model,
-        "instructions": instructions,
-        "input": [
-            {"role": "user", "content": prompt},
-        ],
-    }
-    if json_mode:
+    if is_byesu:
+        payload = {
+            "model": model,
+            "instructions": instructions,
+            "input": prompt,
+        }
+    else:
+        payload = {
+            "model": model,
+            "instructions": instructions,
+            "input": [
+                {"role": "user", "content": prompt},
+            ],
+        }
+    if json_mode and not is_byesu:
         payload["text"] = {"format": {"type": "json_object"}}
 
     if reasoning_effort and not is_byesu:
@@ -390,7 +397,10 @@ async def parse_financial_message(text: str, settings=None) -> List[Transaction]
                 )
                 return ExtractionResult(**_loads_json_object(content)).transactions
             except AIProviderError as exc:
-                if exc.status_code == 400 or (exc.status_code and exc.status_code >= 500):
+                if (
+                    (exc.status_code == 400 or (exc.status_code and exc.status_code >= 500))
+                    and not _is_byesu_base_url(config["base_url"])
+                ):
                     logger.warning(
                         "Responses API failed, falling back to chat_completions once: %s",
                         exc,
