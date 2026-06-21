@@ -38,7 +38,16 @@ class Dispatcher:
             return False
         return int(sender_id) in self.admin_ids
 
-    async def process_message(self, client, msg_id, text, sender_id, timestamp, chat_id=None):
+    async def process_message(
+        self,
+        client,
+        msg_id,
+        text,
+        sender_id,
+        timestamp,
+        chat_id=None,
+        sender_name=None,
+    ):
         """Route a single incoming message."""
         if not text:
             return
@@ -75,6 +84,14 @@ class Dispatcher:
 
         if self.default_handler:
             try:
-                await self.default_handler(client, msg_id, text_trimmed, sender_id, timestamp, chat_id=chat_id)
+                await self.default_handler(
+                    client,
+                    msg_id,
+                    text_trimmed,
+                    sender_id,
+                    timestamp,
+                    chat_id=chat_id,
+                    sender_name=sender_name,
+                )
             except Exception as exc:
                 logger.error("Error in default handler: %s", exc)

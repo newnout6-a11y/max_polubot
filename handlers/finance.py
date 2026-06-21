@@ -5,7 +5,15 @@ from db.models import Database
 logger = logging.getLogger(__name__)
 
 
-async def handle_financial_message(client, msg_id, text, sender_id, timestamp, chat_id=None):
+async def handle_financial_message(
+    client,
+    msg_id,
+    text,
+    sender_id,
+    timestamp,
+    chat_id=None,
+    sender_name=None,
+):
     """Store target-chat messages; AI parsing is started by command or report."""
     target_chat_id = int(getattr(client, "target_chat_id", 0) or 0)
     if not target_chat_id:
@@ -20,5 +28,12 @@ async def handle_financial_message(client, msg_id, text, sender_id, timestamp, c
         )
         return
 
-    await Database.save_message(msg_id, text, sender_id, timestamp, chat_id=chat_id)
+    await Database.save_message(
+        msg_id,
+        text,
+        sender_id,
+        timestamp,
+        chat_id=chat_id,
+        sender_name=sender_name,
+    )
     logger.info("Saved message %s from target chat.", msg_id)

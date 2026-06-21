@@ -354,6 +354,7 @@ class MaxWebsocketClient:
                 chat_id = msg.get("chatId")
             text = msg.get("text", "")
             sender_id = msg.get("sender", 0)
+            sender_name = self._extract_sender_name(msg, payload)
             msg_id = msg.get("id", "")
             ts = msg.get("time", 0)
 
@@ -368,6 +369,58 @@ class MaxWebsocketClient:
                         sender_id,
                         ts,
                         chat_id=chat_id,
+                        sender_name=sender_name,
                     )
                 )
                 self._track_handler_task(task)
+
+    @staticmethod
+    def _extract_sender_name(message: dict, payload: dict | None = None) -> str | None:
+        candidates = [
+            message.get("senderName"),
+            message.get("sender_name"),
+            message.get("authorName"),
+            message.get("author_name"),
+            message.get("fromName"),
+        ]
+        sender = message.get("sender")
+        if isinstance(sender, dict):
+            candidates.extend(
+                [
+                    sender.get("name"),
+                    sender.get("title"),
+                    sender.get("displayName"),
+                    sender.get("fullName"),
+                    sender.get("username"),
+                ]
+            )
+        for container_key in ("user", "author", "from"):
+            item = message.get(container_key)
+            if isinstance(item, dict):
+                candidates.extend(
+                    [
+                        item.get("name"),
+                        item.get("title"),
+                        item.get("displayName"),
+                        item.get("fullName"),
+                        item.get("username"),
+                    ]
+                )
+        if payload:
+            for container_key in ("user", "author", "from"):
+                item = payload.get(container_key)
+                if isinstance(item, dict):
+                    candidates.extend(
+                        [
+                            item.get("name"),
+                            item.get("title"),
+                            item.get("displayName"),
+                            item.get("fullName"),
+                            item.get("username"),
+                        ]
+                    )
+        for value in candidates:
+            text = str(value or "").strip()
+            if text:
+                return text
+        return None

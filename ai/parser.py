@@ -346,6 +346,15 @@ async def _parse_with_responses_api(
     if disable_response_storage and not is_byesu:
         payload["store"] = False
 
+    if is_byesu:
+        logger.info(
+            "Byesu responses payload: keys=%s json_mode=%s has_reasoning=%s has_store=%s",
+            sorted(payload.keys()),
+            json_mode,
+            "reasoning" in payload,
+            "store" in payload,
+        )
+
     async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT_SECONDS) as client:
         response = await client.post(url, headers=headers, json=payload)
         _raise_ai_status(response, "responses")

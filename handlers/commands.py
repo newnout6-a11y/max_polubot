@@ -265,6 +265,11 @@ async def cmd_history(client, args, sender_id, context=None):
                 message.get("sender") or 0,
                 timestamp,
                 chat_id=target_chat_id,
+                sender_name=(
+                    client._extract_sender_name(message)
+                    if hasattr(client, "_extract_sender_name")
+                    else None
+                ),
             )
             saved += 1
 
@@ -307,9 +312,13 @@ async def cmd_messages(client, args, sender_id, context=None):
     lines = [f"Последние сохранённые сообщения target-чата ({len(rows)}):"]
     for row in rows:
         parsed = "parsed" if row["is_parsed"] else "new"
+        sender_name = str(row.get("sender_name") or "").strip()
+        sender_label = (
+            f"{sender_name} ({row['sender_id']})" if sender_name else str(row["sender_id"])
+        )
         lines.append(
             f"- {_format_ts(row['timestamp'])} | {parsed} | "
-            f"id={row['id']} | from={row['sender_id']} | {_preview_text(row['text'])}"
+            f"id={row['id']} | from={sender_label} | {_preview_text(row['text'])}"
         )
 
     await client.queue.put("\n".join(lines))

@@ -80,6 +80,7 @@ class Database:
                     text TEXT NOT NULL,
                     chat_id BIGINT,
                     sender_id BIGINT,
+                    sender_name TEXT,
                     timestamp BIGINT NOT NULL,
                     is_parsed BOOLEAN DEFAULT FALSE,
                     parse_attempts INTEGER DEFAULT 0,
@@ -94,6 +95,7 @@ class Database:
                 """
                 ALTER TABLE messages
                     ADD COLUMN IF NOT EXISTS chat_id BIGINT,
+                    ADD COLUMN IF NOT EXISTS sender_name TEXT,
                     ADD COLUMN IF NOT EXISTS parse_attempts INTEGER DEFAULT 0,
                     ADD COLUMN IF NOT EXISTS next_parse_at BIGINT DEFAULT 0,
                     ADD COLUMN IF NOT EXISTS last_error TEXT,
@@ -148,23 +150,24 @@ class Database:
                 return bool(row and row["ok"] == 1)
 
     @staticmethod
-    async def save_message(msg_id, text, sender_id, timestamp, chat_id=None):
+    async def save_message(msg_id, text, sender_id, timestamp, chat_id=None, sender_name=None):
         pool = Database._require_pool()
         normalized_ts = normalize_unix_timestamp(timestamp)
         async with pool.connection() as conn:
             await conn.execute(
                 """
-                INSERT INTO messages (id, text, chat_id, sender_id, timestamp, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO messages (id, text, chat_id, sender_id, sender_name, timestamp, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO UPDATE SET
                     text = EXCLUDED.text,
                     chat_id = EXCLUDED.chat_id,
                     sender_id = EXCLUDED.sender_id,
+                    sender_name = COALESCE(EXCLUDED.sender_name, messages.sender_name),
                     timestamp = EXCLUDED.timestamp,
                     updated_at = EXCLUDED.updated_at
                 WHERE messages.is_parsed = FALSE
                 """,
-                (msg_id, text, chat_id, sender_id, normalized_ts, int(time.time())),
+                (msg_id, text, chat_id, sender_id, sender_name, normalized_ts, int(time.time())),
             )
 
     @staticmethod
@@ -209,7 +212,7 @@ class Database:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
-                    SELECT id, text, chat_id, sender_id, timestamp, is_parsed, updated_at
+                    SELECT id, text, chat_id, sender_id, sender_name, timestamp, is_parsed, updated_at
                     FROM messages
                     WHERE chat_id = %s
                     ORDER BY timestamp DESC
