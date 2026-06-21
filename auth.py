@@ -63,6 +63,9 @@ async def main():
 
     try:
         await client.start()
+    except asyncio.CancelledError:
+        # Ожидаемое завершение работы при вызове c.stop()
+        pass
     except Exception as e:
         print(f"Ошибка при авторизации: {e}")
 
