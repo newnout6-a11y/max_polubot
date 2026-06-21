@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class QueuedMessage:
     text: str
+    chat_id: int | None = None
     attempts: int = 0
 
 
@@ -32,6 +33,7 @@ class MessageQueue:
         max_size=100,
         typing_chars_per_second=QUEUE_TYPING_CHARS_PER_SECOND,
         typing_max_delay=QUEUE_TYPING_MAX_DELAY,
+        default_chat_id_getter=None,
     ):
         self.queue = asyncio.Queue(maxsize=max_size)
         self.send_func = send_func
@@ -40,6 +42,7 @@ class MessageQueue:
         self.max_size = max_size
         self.typing_chars_per_second = typing_chars_per_second
         self.typing_max_delay = typing_max_delay
+        self.default_chat_id_getter = default_chat_id_getter
         self._worker_task = None
 
     def start(self):
@@ -53,9 +56,11 @@ class MessageQueue:
             await asyncio.gather(self._worker_task, return_exceptions=True)
             self._worker_task = None
 
-    async def put(self, text: str):
+    async def put(self, text: str, chat_id: int | None = None):
         """Add a message to the outgoing queue."""
-        message = QueuedMessage(text=text)
+        if chat_id is None and self.default_chat_id_getter:
+            chat_id = self.default_chat_id_getter()
+        message = QueuedMessage(text=text, chat_id=int(chat_id) if chat_id else None)
         try:
             await asyncio.wait_for(self.queue.put(message), timeout=QUEUE_PUT_TIMEOUT_SECONDS)
         except asyncio.TimeoutError as exc:
@@ -90,7 +95,13 @@ class MessageQueue:
             error,
         )
         await asyncio.sleep(delay)
-        await self.queue.put(QueuedMessage(text=message.text, attempts=message.attempts + 1))
+        await self.queue.put(
+            QueuedMessage(
+                text=message.text,
+                chat_id=message.chat_id,
+                attempts=message.attempts + 1,
+            )
+        )
 
     async def _worker_loop(self):
         while True:
@@ -107,7 +118,7 @@ class MessageQueue:
 
                 logger.info("Typing delay: %.2fs...", typing_delay)
                 await asyncio.sleep(typing_delay)
-                await self.send_func(message.text)
+                await self.send_func(message.text, message.chat_id)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

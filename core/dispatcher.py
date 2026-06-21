@@ -62,18 +62,19 @@ class Dispatcher:
                 logger.warning("Unauthorized command '%s' from user %s. Ignoring.", trigger, sender_id)
                 return
 
-            if chat_id and not getattr(client, "target_chat_id", 0):
-                client.target_chat_id = int(chat_id)
-
             logger.info("Executing command '%s' from user %s", trigger, sender_id)
+            previous_reply_chat_id = getattr(client, "reply_chat_id", None)
+            client.reply_chat_id = int(chat_id) if chat_id else None
             try:
                 await handler(client, args, sender_id, {"chat_id": chat_id, "msg_id": msg_id})
             except Exception as exc:
                 logger.error("Error executing command %s: %s", trigger, exc)
+            finally:
+                client.reply_chat_id = previous_reply_chat_id
             return
 
         if self.default_handler:
             try:
-                await self.default_handler(client, msg_id, text_trimmed, sender_id, timestamp)
+                await self.default_handler(client, msg_id, text_trimmed, sender_id, timestamp, chat_id=chat_id)
             except Exception as exc:
                 logger.error("Error in default handler: %s", exc)

@@ -21,6 +21,7 @@ from core.config import (
     AI_MESSAGE_DELAY_SECONDS,
     COMMAND_ALIASES_CHECKS,
     COMMAND_ALIASES_CHAT,
+    COMMAND_ALIASES_CLEAR_AI,
     COMMAND_ALIASES_HELP,
     COMMAND_ALIASES_ME,
     COMMAND_ALIASES_PING,
@@ -64,7 +65,17 @@ from core.queue import MessageQueue
 from core.session_probe import probe_session
 from core.settings import RuntimeSettings
 from db.models import Database
-from handlers.commands import cmd_chat, cmd_checks, cmd_help, cmd_me, cmd_ping, cmd_setup, cmd_stata, cmd_status
+from handlers.commands import (
+    cmd_chat,
+    cmd_checks,
+    cmd_clear_pending,
+    cmd_help,
+    cmd_me,
+    cmd_ping,
+    cmd_setup,
+    cmd_stata,
+    cmd_status,
+)
 from handlers.finance import handle_financial_message
 
 logging.basicConfig(
@@ -347,6 +358,8 @@ def register_commands(dispatcher: Dispatcher):
         dispatcher.register_command(alias, cmd_setup)
     for alias in COMMAND_ALIASES_CHAT:
         dispatcher.register_bootstrap_command(alias, cmd_chat)
+    for alias in COMMAND_ALIASES_CLEAR_AI:
+        dispatcher.register_command(alias, cmd_clear_pending)
     for alias in COMMAND_ALIASES_ME:
         dispatcher.register_bootstrap_command(alias, cmd_me)
 
@@ -413,9 +426,14 @@ async def main():
 
     client.runtime_settings = settings
     client.target_chat_id = settings.get("target_chat_id")
+    client.reply_chat_id = None
 
-    async def _send_wrapper(text):
-        await client.send_message(client.target_chat_id, text)
+    async def _send_wrapper(text, chat_id=None):
+        destination = int(chat_id or client.target_chat_id or 0)
+        if not destination:
+            logger.warning("Dropping outgoing message because no destination chat is configured.")
+            return
+        await client.send_message(destination, text)
 
     queue = MessageQueue(
         send_func=_send_wrapper,
@@ -424,6 +442,7 @@ async def main():
         max_size=QUEUE_MAX_SIZE,
         typing_chars_per_second=settings.get("queue_typing_chars_per_second"),
         typing_max_delay=settings.get("queue_typing_max_delay"),
+        default_chat_id_getter=lambda: getattr(client, "reply_chat_id", None) or client.target_chat_id,
     )
     client.queue = queue
     runtime["queue"] = queue

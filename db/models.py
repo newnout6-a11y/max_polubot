@@ -403,3 +403,15 @@ class Database:
                 """,
                 (key, str(value), spec.secret, int(time.time())),
             )
+
+    @staticmethod
+    async def clear_unparsed_messages() -> int:
+        pool = Database._require_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                """
+                DELETE FROM messages
+                WHERE is_parsed = FALSE
+                """
+            )
+            return result.rowcount or 0

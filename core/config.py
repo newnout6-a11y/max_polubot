@@ -131,6 +131,10 @@ COMMAND_ALIASES_CHAT = _csv_str_env(
     "COMMAND_ALIASES_CHAT",
     ("\u0447\u0430\u0442", "chat", "chat_id"),
 )
+COMMAND_ALIASES_CLEAR_AI = _csv_str_env(
+    "COMMAND_ALIASES_CLEAR_AI",
+    ("\u043e\u0447\u0438\u0441\u0442\u0438\u0442\u044c_ai", "clear_ai", "clear_pending"),
+)
 COMMAND_ALIASES_ME = _csv_str_env(
     "COMMAND_ALIASES_ME",
     ("\u043a\u0442\u043e\u044f", "me", "my_id"),
