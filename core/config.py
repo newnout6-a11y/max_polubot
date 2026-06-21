@@ -183,8 +183,14 @@ def validate_startup_config() -> StartupValidation:
         warnings.append("TARGET_CHAT_ID is empty: use chat command to set target_chat_id")
     if not ADMIN_IDS:
         warnings.append("ADMIN_IDS is empty: only bootstrap id commands will be accepted")
-    if not GEMINI_API_KEY:
+    if AI_PROVIDER == "gemini" and not GEMINI_API_KEY:
         warnings.append("GEMINI_API_KEY is empty: AI parsing will be paused")
+    if AI_PROVIDER == "openai" and not OPENAI_API_KEY:
+        warnings.append("OPENAI_API_KEY is empty: AI parsing will be paused")
+    if AI_PROVIDER == "deepseek" and not DEEPSEEK_API_KEY:
+        warnings.append("DEEPSEEK_API_KEY is empty: AI parsing will be paused")
+    if AI_PROVIDER not in {"gemini", "openai", "deepseek"}:
+        errors.append("AI_PROVIDER must be one of: gemini, openai, deepseek")
     if QUEUE_MIN_DELAY > QUEUE_MAX_DELAY:
         errors.append("QUEUE_MIN_DELAY must be less than or equal to QUEUE_MAX_DELAY")
     if DB_POOL_MIN_SIZE > DB_POOL_MAX_SIZE:

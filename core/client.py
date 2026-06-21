@@ -150,6 +150,33 @@ class MaxWebsocketClient:
                 future.cancel()
             raise
 
+    async def _send_recv_direct(self, opcode, payload):
+        if self.ws is None:
+            raise ConnectionError("WebSocket is not connected")
+
+        seq = self._get_seq()
+        req = {
+            "seq": seq,
+            "opcode": opcode,
+            "payload": payload,
+            "ver": MAX_PROTOCOL_VERSION,
+            "cmd": 0,
+        }
+
+        try:
+            await self.ws.send(json.dumps(req, ensure_ascii=False))
+            while True:
+                raw = await asyncio.wait_for(
+                    self.ws.recv(),
+                    timeout=MAX_REQUEST_TIMEOUT_SECONDS,
+                )
+                packet = json.loads(raw)
+                if packet.get("seq") == seq:
+                    return packet
+                await self._handle_packet(packet)
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(f"MAX request timed out: opcode={opcode}, seq={seq}") from exc
+
     async def send_message(self, chat_id: int, text: str):
         """Send a text message through an authenticated MAX session."""
         cid = random.randint(1750000000000, 2000000000000)
@@ -215,8 +242,8 @@ class MaxWebsocketClient:
             try:
                 logger.info("[*] Connected to MAX WebSocket")
 
-                await self._send(6, self._get_hello_payload())
-                sync_resp = await self._send(
+                await self._send_recv_direct(6, self._get_hello_payload())
+                sync_resp = await self._send_recv_direct(
                     19,
                     {
                         "token": self.token,
@@ -237,7 +264,7 @@ class MaxWebsocketClient:
                 self.authenticated = True
                 self.last_error = None
                 self.last_authenticated_at = int(time.time())
-                await self._send(22, {"settings": {"user": {"HIDDEN": True}}})
+                await self._send_recv_direct(22, {"settings": {"user": {"HIDDEN": True}}})
 
                 keepalive_task = asyncio.create_task(self._keepalive_loop())
                 await self._recv_loop()
@@ -271,37 +298,40 @@ class MaxWebsocketClient:
         async for msg_text in self.ws:
             try:
                 packet = json.loads(msg_text)
-                seq = packet.get("seq")
-                payload = packet.get("payload", {})
-
-                if seq in self._pending_requests:
-                    self._pending_requests[seq].set_result(packet)
-                    del self._pending_requests[seq]
-                    continue
-
-                if "message" in payload and isinstance(payload["message"], dict):
-                    msg = payload["message"]
-                    chat_id = payload.get("chatId") or msg.get("chatId")
-                    text = msg.get("text", "")
-                    sender_id = msg.get("sender", 0)
-                    msg_id = msg.get("id", "")
-                    ts = msg.get("time", 0)
-
-                    if text and msg_id:
-                        self.last_message_at = int(time.time())
-                        logger.debug("Incoming message %s from chat %s", msg_id, chat_id)
-                        task = asyncio.create_task(
-                            self.dispatcher.process_message(
-                                self,
-                                msg_id,
-                                text,
-                                sender_id,
-                                ts,
-                                chat_id=chat_id,
-                            )
-                        )
-                        self._track_handler_task(task)
+                await self._handle_packet(packet)
             except json.JSONDecodeError:
                 logger.warning("Received non-JSON WebSocket packet")
             except Exception as exc:
                 logger.error("Error handling message: %s", exc)
+
+    async def _handle_packet(self, packet):
+        seq = packet.get("seq")
+        payload = packet.get("payload", {})
+
+        if seq in self._pending_requests:
+            self._pending_requests[seq].set_result(packet)
+            del self._pending_requests[seq]
+            return
+
+        if "message" in payload and isinstance(payload["message"], dict):
+            msg = payload["message"]
+            chat_id = payload.get("chatId") or msg.get("chatId")
+            text = msg.get("text", "")
+            sender_id = msg.get("sender", 0)
+            msg_id = msg.get("id", "")
+            ts = msg.get("time", 0)
+
+            if text and msg_id:
+                self.last_message_at = int(time.time())
+                logger.debug("Incoming message %s from chat %s", msg_id, chat_id)
+                task = asyncio.create_task(
+                    self.dispatcher.process_message(
+                        self,
+                        msg_id,
+                        text,
+                        sender_id,
+                        ts,
+                        chat_id=chat_id,
+                    )
+                )
+                self._track_handler_task(task)
