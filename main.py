@@ -26,6 +26,7 @@ from core.config import (
     COMMAND_ALIASES_ASK_AI,
     COMMAND_ALIASES_HELP,
     COMMAND_ALIASES_HISTORY,
+    COMMAND_ALIASES_MESSAGES,
     COMMAND_ALIASES_ME,
     COMMAND_ALIASES_PARSE_FINANCE,
     COMMAND_ALIASES_PING,
@@ -76,6 +77,7 @@ from handlers.commands import (
     cmd_ask_ai,
     cmd_history,
     cmd_help,
+    cmd_messages,
     cmd_me,
     cmd_ping,
     cmd_parse_finance,
@@ -381,6 +383,8 @@ def register_commands(dispatcher: Dispatcher):
         dispatcher.register_command(alias, cmd_ask_ai)
     for alias in COMMAND_ALIASES_HISTORY:
         dispatcher.register_command(alias, cmd_history)
+    for alias in COMMAND_ALIASES_MESSAGES:
+        dispatcher.register_command(alias, cmd_messages)
     for alias in COMMAND_ALIASES_HELP:
         dispatcher.register_command(alias, cmd_help)
     for alias in COMMAND_ALIASES_STATUS:

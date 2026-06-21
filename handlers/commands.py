@@ -1,6 +1,7 @@
 import logging
 import shlex
 import time
+from datetime import datetime
 
 from ai.parser import AIProviderError, ask_ai, is_ai_available, parse_financial_message
 from core.config import (
@@ -178,6 +179,31 @@ def _parse_history_days(args: str) -> int:
     return max(1, min(days, HISTORY_MAX_DAYS))
 
 
+def _parse_preview_limit(args: str, default: int = 10, maximum: int = 50) -> int:
+    raw = (args or "").strip().split()
+    if not raw:
+        return default
+    try:
+        value = int(raw[0])
+    except ValueError:
+        return default
+    return max(1, min(value, maximum))
+
+
+def _format_ts(timestamp) -> str:
+    try:
+        return datetime.fromtimestamp(int(timestamp)).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError, OSError):
+        return "unknown-time"
+
+
+def _preview_text(text: str, limit: int = 180) -> str:
+    compact = " ".join((text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
 async def cmd_history(client, args, sender_id, context=None):
     if not hasattr(client, "fetch_chat_history"):
         await client.queue.put("MAX history fetch is not supported by this client.")
@@ -262,6 +288,31 @@ async def cmd_history(client, args, sender_id, context=None):
             ]
         )
     )
+
+
+async def cmd_messages(client, args, sender_id, context=None):
+    target_chat_id = int(getattr(client, "target_chat_id", 0) or 0)
+    if not target_chat_id:
+        await client.queue.put(
+            f"Сначала задай target_chat_id: {COMMAND_PREFIX}настройка target_chat_id here"
+        )
+        return
+
+    limit = _parse_preview_limit(args)
+    rows = await Database.get_recent_messages(target_chat_id, limit=limit)
+    if not rows:
+        await client.queue.put("В БД пока нет сохранённых сообщений target-чата.")
+        return
+
+    lines = [f"Последние сохранённые сообщения target-чата ({len(rows)}):"]
+    for row in rows:
+        parsed = "parsed" if row["is_parsed"] else "new"
+        lines.append(
+            f"- {_format_ts(row['timestamp'])} | {parsed} | "
+            f"id={row['id']} | from={row['sender_id']} | {_preview_text(row['text'])}"
+        )
+
+    await client.queue.put("\n".join(lines))
 
 
 async def cmd_status(client, args, sender_id, context=None):
@@ -453,6 +504,7 @@ async def cmd_help(client, args, sender_id, context=None):
         f"- {prefix}\u0440\u0430\u0437\u043e\u0431\u0440\u0430\u0442\u044c \u043d\u0435\u0434\u0435\u043b\u044f - AI-\u0440\u0430\u0437\u0431\u043e\u0440 \u043d\u043e\u0432\u044b\u0445 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439\n"
         f"- {prefix}\u0440\u0430\u0437\u043e\u0431\u0440\u0430\u0442\u044c \u043d\u0435\u0434\u0435\u043b\u044f all - \u043f\u043e\u0432\u0442\u043e\u0440\u043d\u044b\u0439 \u0440\u0430\u0437\u0431\u043e\u0440 \u0432\u0441\u0435\u0445 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439\n"
         f"- {prefix}\u0438\u0441\u0442\u043e\u0440\u0438\u044f 10 - \u0441\u043a\u0430\u0447\u0430\u0442\u044c \u0438\u0441\u0442\u043e\u0440\u0438\u044e target-\u0447\u0430\u0442\u0430 \u0437\u0430 10 \u0434\u043d\u0435\u0439\n"
+        f"- {prefix}\u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f 20 - \u043f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d\u043d\u044b\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f target-\u0447\u0430\u0442\u0430\n"
         f"- {prefix}\u0440\u0430\u0437\u043e\u0431\u0440\u0430\u0442\u044c 10 - AI-\u0440\u0430\u0437\u0431\u043e\u0440 \u0437\u0430 10 \u0434\u043d\u0435\u0439\n"
         f"- {prefix}ai \u0432\u043e\u043f\u0440\u043e\u0441 - \u0441\u043f\u0440\u043e\u0441\u0438\u0442\u044c AI\n"
         f"- {prefix}\u0441\u0442\u0430\u0442\u0430 \u043c\u0435\u0441\u044f\u0446 - \u0441\u0432\u043e\u0434\u043a\u0430 \u0437\u0430 30 \u0434\u043d\u0435\u0439\n"

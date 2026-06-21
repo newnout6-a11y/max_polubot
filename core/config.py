@@ -127,6 +127,10 @@ COMMAND_ALIASES_HISTORY = _csv_str_env(
     "COMMAND_ALIASES_HISTORY",
     ("\u0438\u0441\u0442\u043e\u0440\u0438\u044f", "history", "backfill"),
 )
+COMMAND_ALIASES_MESSAGES = _csv_str_env(
+    "COMMAND_ALIASES_MESSAGES",
+    ("\u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f", "messages", "saved"),
+)
 COMMAND_ALIASES_HELP = _csv_str_env("COMMAND_ALIASES_HELP", ("\u0445\u0435\u043b\u043f", "help"))
 COMMAND_ALIASES_STATUS = _csv_str_env(
     "COMMAND_ALIASES_STATUS",

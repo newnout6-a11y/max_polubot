@@ -202,6 +202,24 @@ class Database:
                 return await cur.fetchall()
 
     @staticmethod
+    async def get_recent_messages(chat_id, limit=10):
+        pool = Database._require_pool()
+        limit = max(1, min(int(limit), 50))
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT id, text, chat_id, sender_id, timestamp, is_parsed, updated_at
+                    FROM messages
+                    WHERE chat_id = %s
+                    ORDER BY timestamp DESC
+                    LIMIT %s
+                    """,
+                    (int(chat_id), limit),
+                )
+                return await cur.fetchall()
+
+    @staticmethod
     async def get_unparsed_messages(limit=20):
         pool = Database._require_pool()
         async with pool.connection() as conn:
