@@ -1,179 +1,454 @@
 import asyncio
-import logging
 import json
+import logging
 import os
+import time
+
+import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI
-import uvicorn
+from fastapi.responses import JSONResponse
 
+from ai.parser import is_ai_available, parse_financial_message
+from core.client import MaxWebsocketClient, SessionAuthError
 from core.config import (
-    TARGET_CHAT_ID, ADMIN_IDS, 
-    REPORT_DAY_OF_WEEK, REPORT_HOUR, REPORT_MINUTE,
-    QUEUE_MIN_DELAY, QUEUE_MAX_DELAY
+    ADMIN_IDS,
+    AI_BATCH_LIMIT,
+    AI_LOOP_INTERVAL_SECONDS,
+    AI_MESSAGE_DELAY_SECONDS,
+    COMMAND_ALIASES_CHECKS,
+    COMMAND_ALIASES_CHAT,
+    COMMAND_ALIASES_HELP,
+    COMMAND_ALIASES_ME,
+    COMMAND_ALIASES_PING,
+    COMMAND_ALIASES_SETUP,
+    COMMAND_ALIASES_STATS,
+    COMMAND_ALIASES_STATUS,
+    AI_PROVIDER,
+    DEEPSEEK_API_KEY,
+    DEEPSEEK_BASE_URL,
+    DEEPSEEK_MODEL,
+    DEEPSEEK_REASONING_EFFORT,
+    DEEPSEEK_WIRE_API,
+    DISABLE_RESPONSE_STORAGE,
+    GEMINI_API_KEY,
+    GEMINI_MODEL,
+    OPENAI_API_KEY,
+    OPENAI_BASE_URL,
+    OPENAI_MODEL,
+    OPENAI_REASONING_EFFORT,
+    OPENAI_WIRE_API,
+    QUEUE_MAX_DELAY,
+    QUEUE_MAX_SIZE,
+    QUEUE_MIN_DELAY,
+    READINESS_MAX_DISCONNECTED_SECONDS,
+    REPORT_DAY_OF_WEEK,
+    REPORT_HOUR,
+    REPORT_MINUTE,
+    SESSION_FILE,
+    STARTUP_SESSION_CHECK,
+    TARGET_CHAT_ID,
+    WATCHDOG_INTERVAL_SECONDS,
+    WATCHDOG_SESSION_CHECK_INTERVAL_SECONDS,
+    WEB_HOST,
+    WEB_PORT,
+    validate_startup_config,
 )
-from core.client import MaxWebsocketClient
-from core.queue import MessageQueue
 from core.dispatcher import Dispatcher
+from core.queue import MessageQueue
+from core.session_probe import probe_session
+from core.settings import RuntimeSettings
 from db.models import Database
-from ai.parser import parse_financial_message
-from handlers.commands import cmd_ping, cmd_stata, cmd_help
+from handlers.commands import cmd_chat, cmd_checks, cmd_help, cmd_me, cmd_ping, cmd_setup, cmd_stata, cmd_status
 from handlers.finance import handle_financial_message
 
-# FastAPI app for Hugging Face health checks & keep-alive
-app = FastAPI(title="MAX Polubot Keep-Alive")
-
-@app.get("/")
-async def health_check():
-    return {
-        "status": "ok", 
-        "bot": "MAX Polubot is running",
-        "database": "connected" if Database.pool else "disconnected"
-    }
-
-# Logging setup with rotation capability in production
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-async def background_ai_processor():
-    """Фоновый воркер для парсинга финансов с Retry механикой."""
-    while True:
+app = FastAPI(title="MAX Polubot")
+runtime = {
+    "started_at": int(time.time()),
+    "client": None,
+    "queue": None,
+    "session_source": None,
+    "settings": None,
+    "last_checks": {},
+    "shutting_down": False,
+}
+
+
+def _now() -> int:
+    return int(time.time())
+
+
+@app.get("/")
+async def liveness():
+    return {"status": "alive", "uptime_seconds": _now() - runtime["started_at"]}
+
+
+@app.get("/health")
+async def health_check():
+    return await collect_status(include_db_stats=True)
+
+
+@app.get("/ready")
+async def readiness_check():
+    status = await collect_status(include_db_stats=False)
+    return JSONResponse(status_code=200 if status["ready"] else 503, content=status)
+
+
+@app.get("/metrics")
+async def metrics_check():
+    return await collect_status(include_db_stats=True)
+
+
+async def collect_status(include_db_stats: bool = False):
+    client = runtime.get("client")
+    queue = runtime.get("queue")
+    settings = runtime.get("settings")
+    client_status = client.status_snapshot() if client else {}
+    queue_stats = queue.stats() if queue else {}
+
+    db_ok = False
+    db_stats = None
+    db_error = None
+    if Database.pool:
         try:
-            unparsed = await Database.get_unparsed_messages()
-            for row in unparsed:
-                msg_id = row['id']
-                text = row['text']
-                ts = row['timestamp']
-                
-                logger.info(f"AI Processing message {msg_id}...")
-                try:
-                    transactions = await parse_financial_message(text)
-                    
-                    for t in transactions:
-                        await Database.save_finance(msg_id, t.category, t.expense, t.income, ts)
-                        logger.info(f"Saved tx: {t.category} | Exp: {t.expense} | Inc: {t.income}")
-                        
-                    await Database.mark_parsed(msg_id)
-                except Exception as e:
-                    # Если API упало, оставляем is_parsed=FALSE и попробуем в следующем цикле
-                    logger.error(f"Failed to parse {msg_id}, will retry later. Error: {e}")
-                
-                # Rate limiting for Gemini
-                await asyncio.sleep(3)
-        except Exception as e:
-            logger.error(f"Error in background AI loop: {e}")
-            
-        await asyncio.sleep(15)
+            db_ok = await Database.ping()
+            if include_db_stats:
+                db_stats = await Database.get_operational_stats()
+        except Exception as exc:
+            db_error = str(exc)
 
-async def cron_weekly_report(queue):
-    """Еженедельный автоматический отчет."""
-    from handlers.commands import cmd_stata
-    # Dummy client adapter for the command handler
-    class DummyClient:
-        def __init__(self, q):
-            self.queue = q
-    await cmd_stata(DummyClient(queue), "", 0)
+    disconnected_for = None
+    if client and not client.authenticated:
+        last_seen = client.last_authenticated_at or client.last_connected_at
+        disconnected_for = _now() - last_seen if last_seen else None
 
-async def main():
-    logger.info("Starting MAX Polubot (Production Mode)...")
-    
-    # 1. Init DB
-    try:
-        await Database.init()
-    except Exception as e:
-        logger.critical(f"Failed to initialize database: {e}")
-        return
-    
-    # 2. Get credentials (either from environment variable SESSION_JSON or session.json file)
-    device_id = None
-    token = None
-    
-    # Check environment variable first (recommended for cloud deployments)
+    queue_ok = bool(queue_stats.get("worker_running", False))
+    max_ok = bool(client_status.get("authenticated", False))
+    ready = (
+        not runtime["shutting_down"]
+        and db_ok
+        and queue_ok
+        and max_ok
+        and (
+            disconnected_for is None
+            or disconnected_for <= READINESS_MAX_DISCONNECTED_SECONDS
+        )
+    )
+
+    checks = runtime.get("last_checks", {})
+    return {
+        "status": "ok" if ready else "degraded",
+        "ready": ready,
+        "uptime_seconds": _now() - runtime["started_at"],
+        "session_source": runtime.get("session_source"),
+        "database": {"ok": db_ok, "error": db_error, "stats": db_stats},
+        "max": client_status,
+        "queue": queue_stats,
+        "ai": {
+            "available": is_ai_available(settings),
+            "provider": settings.get("ai_provider") if settings else None,
+        },
+        "checks": checks,
+    }
+
+
+def load_session_credentials() -> tuple[str | None, str | None, str | None]:
     session_env = os.getenv("SESSION_JSON")
     if session_env:
         try:
             data = json.loads(session_env)
-            device_id = data.get("deviceId")
+            device_id = data.get("deviceId") or data.get("device_id")
             token = data.get("token")
-            logger.info("Credentials loaded successfully from SESSION_JSON environment variable.")
-        except Exception as e:
-            logger.error(f"Failed to parse SESSION_JSON environment variable: {e}")
-            
-    # Fallback to local file if env is not set
-    if not device_id or not token:
+            if device_id and token:
+                logger.info("Credentials loaded from SESSION_JSON.")
+                return "SESSION_JSON", device_id, token
+            logger.error("SESSION_JSON does not contain deviceId/device_id and token.")
+        except json.JSONDecodeError as exc:
+            logger.error("Failed to parse SESSION_JSON: %s", exc)
+
+    try:
+        with open(SESSION_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+            device_id = data.get("deviceId") or data.get("device_id")
+            token = data.get("token")
+            if device_id and token:
+                logger.info("Credentials loaded from %s.", SESSION_FILE)
+                return SESSION_FILE, device_id, token
+            logger.error("%s does not contain deviceId/device_id and token.", SESSION_FILE)
+    except FileNotFoundError:
+        logger.error("Session file %s was not found.", SESSION_FILE)
+    except json.JSONDecodeError as exc:
+        logger.error("Failed to parse %s: %s", SESSION_FILE, exc)
+
+    return None, None, None
+
+
+async def run_startup_session_check(device_id, token) -> bool:
+    if not STARTUP_SESSION_CHECK:
+        logger.warning("Startup MAX session probe is disabled.")
+        return True
+
+    result = await probe_session(device_id, token)
+    runtime["last_checks"]["session"] = {
+        "ok": result.ok,
+        "error": result.error,
+        "message": result.message,
+        "checked_at": _now(),
+    }
+
+    if result.ok:
+        logger.info("Startup MAX session probe passed.")
+        return True
+
+    if result.invalid_session:
+        logger.critical(
+            "Startup MAX session probe failed: %s %s. Refresh SESSION_JSON with auth.py.",
+            result.error,
+            result.message or "",
+        )
+        return False
+
+    logger.warning(
+        "Startup MAX session probe could not verify the session: %s %s. Continuing.",
+        result.error,
+        result.message or "",
+    )
+    return True
+
+
+async def background_ai_processor():
+    """Parse stored messages in small batches without blocking the WebSocket listener."""
+    while True:
         try:
-            with open("session.json", "r") as f:
-                data = json.load(f)
-                device_id = data.get("deviceId")
-                token = data.get("token")
-                logger.info("Credentials loaded successfully from local session.json file.")
-        except FileNotFoundError:
-            pass
-            
-    if not device_id or not token:
-        logger.critical("Authentication credentials not found! Please run auth.py locally or set the SESSION_JSON environment variable.")
+            settings = runtime.get("settings")
+            if not is_ai_available(settings):
+                runtime["last_checks"]["ai"] = {
+                    "ok": False,
+                    "message": "GEMINI_API_KEY is missing or client failed to initialize",
+                    "checked_at": _now(),
+                }
+                await asyncio.sleep(AI_LOOP_INTERVAL_SECONDS)
+                continue
+
+            runtime["last_checks"]["ai"] = {"ok": True, "checked_at": _now()}
+            unparsed = await Database.get_unparsed_messages(limit=AI_BATCH_LIMIT)
+            for row in unparsed:
+                msg_id = row["id"]
+                text = row["text"]
+                ts = row["timestamp"]
+
+                logger.info("AI processing message %s...", msg_id)
+                try:
+                    transactions = await parse_financial_message(text, settings=settings)
+                    await Database.replace_finances(msg_id, transactions, ts)
+                    logger.info("Parsed %s transactions for message %s", len(transactions), msg_id)
+                except Exception as exc:
+                    await Database.mark_parse_failed(msg_id, exc)
+                    logger.error("Failed to parse %s, will retry later: %s", msg_id, exc)
+
+                await asyncio.sleep(AI_MESSAGE_DELAY_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            runtime["last_checks"]["ai"] = {
+                "ok": False,
+                "message": str(exc),
+                "checked_at": _now(),
+            }
+            logger.error("Error in background AI loop: %s", exc)
+
+        await asyncio.sleep(AI_LOOP_INTERVAL_SECONDS)
+
+
+async def watchdog_processor(client: MaxWebsocketClient):
+    last_session_probe_at = 0
+    while True:
+        try:
+            db_ok = await Database.ping()
+            runtime["last_checks"]["database"] = {"ok": db_ok, "checked_at": _now()}
+
+            should_probe_session = (
+                _now() - last_session_probe_at >= WATCHDOG_SESSION_CHECK_INTERVAL_SECONDS
+                and (not client.authenticated or client.last_error)
+            )
+            if should_probe_session:
+                result = await probe_session(client.device_id, client.token)
+                last_session_probe_at = _now()
+                runtime["last_checks"]["session"] = {
+                    "ok": result.ok,
+                    "error": result.error,
+                    "message": result.message,
+                    "checked_at": last_session_probe_at,
+                }
+                if result.invalid_session:
+                    client.last_error = f"{result.error}: {result.message or ''}".strip()
+                    logger.critical("MAX session became invalid: %s", client.last_error)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            runtime["last_checks"]["watchdog"] = {
+                "ok": False,
+                "message": str(exc),
+                "checked_at": _now(),
+            }
+            logger.error("Watchdog check failed: %s", exc)
+
+        await asyncio.sleep(WATCHDOG_INTERVAL_SECONDS)
+
+
+async def cron_weekly_report(queue):
+    class DummyClient:
+        def __init__(self, message_queue):
+            self.queue = message_queue
+
+    await cmd_stata(DummyClient(queue), "", 0)
+
+
+def register_commands(dispatcher: Dispatcher):
+    for alias in COMMAND_ALIASES_PING:
+        dispatcher.register_command(alias, cmd_ping)
+    for alias in COMMAND_ALIASES_STATS:
+        dispatcher.register_command(alias, cmd_stata)
+    for alias in COMMAND_ALIASES_HELP:
+        dispatcher.register_command(alias, cmd_help)
+    for alias in COMMAND_ALIASES_STATUS:
+        dispatcher.register_command(alias, cmd_status)
+    for alias in COMMAND_ALIASES_CHECKS:
+        dispatcher.register_command(alias, cmd_checks)
+    for alias in COMMAND_ALIASES_SETUP:
+        dispatcher.register_command(alias, cmd_setup)
+    for alias in COMMAND_ALIASES_CHAT:
+        dispatcher.register_bootstrap_command(alias, cmd_chat)
+    for alias in COMMAND_ALIASES_ME:
+        dispatcher.register_bootstrap_command(alias, cmd_me)
+
+
+def default_runtime_settings():
+    return {
+        "target_chat_id": TARGET_CHAT_ID,
+        "ai_provider": AI_PROVIDER,
+        "gemini_api_key": GEMINI_API_KEY,
+        "gemini_model": GEMINI_MODEL,
+        "openai_api_key": OPENAI_API_KEY,
+        "openai_model": OPENAI_MODEL,
+        "openai_base_url": OPENAI_BASE_URL,
+        "openai_wire_api": OPENAI_WIRE_API,
+        "openai_reasoning_effort": OPENAI_REASONING_EFFORT,
+        "disable_response_storage": DISABLE_RESPONSE_STORAGE,
+        "deepseek_api_key": DEEPSEEK_API_KEY,
+        "deepseek_model": DEEPSEEK_MODEL,
+        "deepseek_base_url": DEEPSEEK_BASE_URL,
+        "deepseek_wire_api": DEEPSEEK_WIRE_API,
+        "deepseek_reasoning_effort": DEEPSEEK_REASONING_EFFORT,
+        "report_day_of_week": REPORT_DAY_OF_WEEK,
+        "report_hour": REPORT_HOUR,
+        "report_minute": REPORT_MINUTE,
+        "queue_min_delay": QUEUE_MIN_DELAY,
+        "queue_max_delay": QUEUE_MAX_DELAY,
+    }
+
+
+async def main():
+    logger.info("Starting MAX Polubot...")
+
+    validation = validate_startup_config()
+    for warning in validation.warnings:
+        logger.warning(warning)
+    if not validation.ok:
+        for error in validation.errors:
+            logger.critical(error)
         return
-        
-    # 3. Setup Dispatcher (Router)
+
+    await Database.init()
+    settings = await Database.load_settings(default_runtime_settings())
+    runtime["settings"] = settings
+
+    session_source, device_id, token = load_session_credentials()
+    runtime["session_source"] = session_source
+    if not device_id or not token:
+        logger.critical("Authentication credentials not found. Run auth.py or set SESSION_JSON.")
+        await Database.close()
+        return
+
+    if not await run_startup_session_check(device_id, token):
+        await Database.close()
+        return
+
     dispatcher = Dispatcher(admin_ids=ADMIN_IDS)
-    dispatcher.register_command("пинг", cmd_ping)
-    dispatcher.register_command("стата", cmd_stata)
-    dispatcher.register_command("хелп", cmd_help)
+    register_commands(dispatcher)
     dispatcher.set_default_handler(handle_financial_message)
-    
-    # 4. Setup Client & Queue
+
     client = MaxWebsocketClient(device_id, token, dispatcher)
-    
-    # Bind the queue to the client's actual send method
+    runtime["client"] = client
+
+    client.runtime_settings = settings
+    client.target_chat_id = settings.get("target_chat_id")
+
     async def _send_wrapper(text):
-        await client.send_message(TARGET_CHAT_ID, text)
-        
+        await client.send_message(client.target_chat_id, text)
+
     queue = MessageQueue(
         send_func=_send_wrapper,
-        min_delay=QUEUE_MIN_DELAY,
-        max_delay=QUEUE_MAX_DELAY
+        min_delay=settings.get("queue_min_delay"),
+        max_delay=settings.get("queue_max_delay"),
+        max_size=QUEUE_MAX_SIZE,
     )
-    
-    # Inject queue into client so handlers can use `client.queue.put`
     client.queue = queue
-    
-    # 5. Setup Scheduler
+    runtime["queue"] = queue
+    client.report_job_func = cron_weekly_report
+
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         cron_weekly_report,
-        CronTrigger(day_of_week=REPORT_DAY_OF_WEEK, hour=REPORT_HOUR, minute=REPORT_MINUTE),
-        args=[queue]
+        CronTrigger(
+            day_of_week=settings.get("report_day_of_week"),
+            hour=settings.get("report_hour"),
+            minute=settings.get("report_minute"),
+        ),
+        args=[queue],
+        id="weekly_finance_report",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
     )
-    
-    # 6. Start all background tasks
+    client.scheduler = scheduler
+
     queue.start()
     scheduler.start()
-    
-    # AI Processor
-    ai_task = asyncio.create_task(background_ai_processor())
-    
-    # Start FastAPI server on port 7860 (Hugging Face health check port)
-    config = uvicorn.Config(app, host="0.0.0.0", port=7860, log_level="warning")
+    ai_task = asyncio.create_task(background_ai_processor(), name="ai_processor")
+    watchdog_task = asyncio.create_task(watchdog_processor(client), name="watchdog")
+
+    config = uvicorn.Config(app, host=WEB_HOST, port=WEB_PORT, log_level="warning")
     server = uvicorn.Server(config)
-    web_task = asyncio.create_task(server.serve())
-    logger.info("Keep-alive FastAPI server started on port 7860.")
-    
-    # 7. Start Main Client Loop (Blocks)
+    web_task = asyncio.create_task(server.serve(), name="health_server")
+    logger.info("Keep-alive FastAPI server started on %s:%s.", WEB_HOST, WEB_PORT)
+
     try:
         await client.start()
+    except SessionAuthError:
+        logger.critical("MAX session is invalid or expired. Refresh SESSION_JSON with auth.py.")
     except asyncio.CancelledError:
-        pass
+        raise
     finally:
+        runtime["shutting_down"] = True
         logger.info("Shutting down background tasks...")
-        queue.stop()
+        scheduler.shutdown(wait=False)
+        await client.stop()
+        await queue.stop()
+
         ai_task.cancel()
-        web_task.cancel()
-        if Database.pool:
-            await Database.pool.close()
-            logger.info("Database connection pool closed.")
+        watchdog_task.cancel()
+        server.should_exit = True
+        await asyncio.gather(ai_task, watchdog_task, web_task, return_exceptions=True)
+        await Database.close()
+
 
 if __name__ == "__main__":
     try:

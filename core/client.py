@@ -2,17 +2,38 @@ import asyncio
 import json
 import logging
 import random
+import time
+
 import websockets
+
+from core.config import (
+    MAX_APP_VERSION,
+    MAX_BACKOFF_INITIAL_SECONDS,
+    MAX_BACKOFF_MAX_SECONDS,
+    MAX_DEVICE_LOCALE,
+    MAX_DEVICE_NAME,
+    MAX_DEVICE_TYPE,
+    MAX_KEEPALIVE_INTERVAL_SECONDS,
+    MAX_LOCALE,
+    MAX_OS_VERSION,
+    MAX_PROTOCOL_VERSION,
+    MAX_REQUEST_TIMEOUT_SECONDS,
+    MAX_SCREEN,
+    MAX_TIMEZONE,
+    MAX_USER_AGENT,
+    MAX_WS_ORIGIN,
+    MAX_WS_URL,
+)
 
 logger = logging.getLogger(__name__)
 
+
+class SessionAuthError(RuntimeError):
+    """Raised when MAX rejects the saved session token."""
+
+
 class MaxWebsocketClient:
-    """
-    Умный WebSocket клиент для MAX.
-    Поддерживает Exponential Backoff, реконнекты и эмуляцию живого браузера.
-    """
-    WS_URL = "wss://ws-api.oneme.ru/websocket"
-    USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+    """MAX WebSocket client with reconnects, bounded waits and clean shutdown."""
 
     def __init__(self, device_id, token, dispatcher):
         self.device_id = device_id
@@ -21,7 +42,16 @@ class MaxWebsocketClient:
         self.seq = 0
         self.ws = None
         self._pending_requests = {}
+        self._handler_tasks = set()
+        self._stopping = False
         self.connected = False
+        self.authenticated = False
+        self.last_error = None
+        self.reconnect_count = 0
+        self.last_connected_at = None
+        self.last_authenticated_at = None
+        self.last_message_at = None
+        self.last_keepalive_at = None
 
     def _get_seq(self):
         self.seq += 1
@@ -30,122 +60,211 @@ class MaxWebsocketClient:
     def _get_hello_payload(self):
         return {
             "userAgent": {
-                "deviceType": "WEB",
-                "locale": "ru",
-                "deviceLocale": "ru",
-                "osVersion": "Windows",
-                "deviceName": "Chrome",
-                "headerUserAgent": self.USER_AGENT,
-                "appVersion": "26.2.2",
-                "screen": "1920x1080 1.0x",
-                "timezone": "Europe/Moscow"
+                "deviceType": MAX_DEVICE_TYPE,
+                "locale": MAX_LOCALE,
+                "deviceLocale": MAX_DEVICE_LOCALE,
+                "osVersion": MAX_OS_VERSION,
+                "deviceName": MAX_DEVICE_NAME,
+                "headerUserAgent": MAX_USER_AGENT,
+                "appVersion": MAX_APP_VERSION,
+                "screen": MAX_SCREEN,
+                "timezone": MAX_TIMEZONE,
             },
-            "deviceId": self.device_id
+            "deviceId": self.device_id,
         }
 
-    async def _send(self, opcode, payload):
-        if not self.ws or not self.connected:
+    def _fail_pending(self, exc):
+        for seq, future in list(self._pending_requests.items()):
+            if not future.done():
+                future.set_exception(exc)
+            self._pending_requests.pop(seq, None)
+
+    def _track_handler_task(self, task):
+        self._handler_tasks.add(task)
+
+        def _cleanup(done_task):
+            self._handler_tasks.discard(done_task)
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.error("Unhandled message handler error: %s", exc)
+
+        task.add_done_callback(_cleanup)
+
+    async def stop(self):
+        self._stopping = True
+        if self.ws is not None:
+            await self.ws.close()
+
+        for task in list(self._handler_tasks):
+            task.cancel()
+        if self._handler_tasks:
+            await asyncio.gather(*self._handler_tasks, return_exceptions=True)
+
+        self._fail_pending(ConnectionError("MAX client stopped"))
+
+    def status_snapshot(self):
+        return {
+            "connected": self.connected,
+            "authenticated": self.authenticated,
+            "stopping": self._stopping,
+            "pending_requests": len(self._pending_requests),
+            "handler_tasks": len(self._handler_tasks),
+            "reconnect_count": self.reconnect_count,
+            "last_error": self.last_error,
+            "last_connected_at": self.last_connected_at,
+            "last_authenticated_at": self.last_authenticated_at,
+            "last_message_at": self.last_message_at,
+            "last_keepalive_at": self.last_keepalive_at,
+        }
+
+    async def _send(self, opcode, payload, *, require_authenticated=False):
+        if self.ws is None:
             raise ConnectionError("WebSocket is not connected")
-        
+        if require_authenticated and not self.authenticated:
+            raise ConnectionError("MAX session is not authenticated")
+
         seq = self._get_seq()
         req = {
             "seq": seq,
             "opcode": opcode,
             "payload": payload,
-            "ver": 11,
-            "cmd": 0
+            "ver": MAX_PROTOCOL_VERSION,
+            "cmd": 0,
         }
-        
+
         future = asyncio.get_running_loop().create_future()
         self._pending_requests[seq] = future
-        
-        await self.ws.send(json.dumps(req))
-        return await future
+
+        try:
+            await self.ws.send(json.dumps(req, ensure_ascii=False))
+            return await asyncio.wait_for(future, timeout=MAX_REQUEST_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as exc:
+            self._pending_requests.pop(seq, None)
+            raise TimeoutError(f"MAX request timed out: opcode={opcode}, seq={seq}") from exc
+        except Exception:
+            self._pending_requests.pop(seq, None)
+            if not future.done():
+                future.cancel()
+            raise
 
     async def send_message(self, chat_id: int, text: str):
-        """Отправляет текстовое сообщение (вызывается из очереди)."""
+        """Send a text message through an authenticated MAX session."""
         cid = random.randint(1750000000000, 2000000000000)
-        logger.debug(f"Sending message to {chat_id}: {text[:20]}...")
-        
-        return await self._send(64, {
-            "chatId": chat_id,
-            "message": {
-                "text": text,
-                "cid": cid,
-                "elements": [],
-                "attaches": []
+        logger.debug("Sending message to %s: %s...", chat_id, text[:20])
+
+        return await self._send(
+            64,
+            {
+                "chatId": chat_id,
+                "message": {
+                    "text": text,
+                    "cid": cid,
+                    "elements": [],
+                    "attaches": [],
+                },
+                "notify": True,
             },
-            "notify": True
-        })
+            require_authenticated=True,
+        )
 
     async def start(self):
-        """Запускает клиент с Exponential Backoff при обрывах."""
-        backoff = 1.0
-        max_backoff = 32.0
+        """Run the client until stopped, reconnecting on transient failures."""
+        backoff = MAX_BACKOFF_INITIAL_SECONDS
 
-        while True:
+        while not self._stopping:
             try:
                 await self._connect_and_listen()
-                # Если вышли без исключения, значит штатная остановка
-                break
-            except Exception as e:
+                if not self._stopping:
+                    raise ConnectionError("MAX WebSocket listener finished unexpectedly")
+            except asyncio.CancelledError:
+                self._stopping = True
+                raise
+            except SessionAuthError:
                 self.connected = False
-                logger.error(f"WebSocket disconnected: {e}. Reconnecting in {backoff}s...")
+                self.authenticated = False
+                raise
+            except Exception as exc:
+                self.connected = False
+                self.authenticated = False
+                self.last_error = str(exc)
+                self.reconnect_count += 1
+                logger.error("WebSocket disconnected: %s. Reconnecting in %.1fs...", exc, backoff)
                 await asyncio.sleep(backoff)
-                # Exponential backoff
-                backoff = min(max_backoff, backoff * 2)
+                backoff = min(MAX_BACKOFF_MAX_SECONDS, backoff * 2)
 
     async def _connect_and_listen(self):
-        async for ws in websockets.connect(self.WS_URL, origin="https://web.max.ru", user_agent_header=self.USER_AGENT):
+        async for ws in websockets.connect(
+            MAX_WS_URL,
+            origin=MAX_WS_ORIGIN,
+            user_agent_header=MAX_USER_AGENT,
+            ping_interval=None,
+        ):
+            if self._stopping:
+                await ws.close()
+                return
+
             self.ws = ws
+            self.connected = True
+            self.authenticated = False
+            self.last_connected_at = int(time.time())
+            keepalive_task = None
+
             try:
                 logger.info("[*] Connected to MAX WebSocket")
-                
-                # 1. Hello
+
                 await self._send(6, self._get_hello_payload())
-                
-                # 2. Login
-                sync_resp = await self._send(19, {
-                    "token": self.token,
-                    "interactive": True,
-                    "chatsCount": 40,
-                    "chatsSync": 0,
-                    "contactsSync": 0,
-                    "presenceSync": 0,
-                    "draftsSync": 0
-                })
-                
+                sync_resp = await self._send(
+                    19,
+                    {
+                        "token": self.token,
+                        "interactive": True,
+                        "chatsCount": 40,
+                        "chatsSync": 0,
+                        "contactsSync": 0,
+                        "presenceSync": 0,
+                        "draftsSync": 0,
+                    },
+                )
+
                 if "error" in sync_resp.get("payload", {}):
-                    logger.critical(f"Auth failed: {sync_resp['payload']['error']}")
-                    return
-                
-                # 3. Stealth (Невидимка)
+                    error = sync_resp["payload"]["error"]
+                    logger.critical("MAX auth failed: %s. Refresh SESSION_JSON with auth.py.", error)
+                    raise SessionAuthError(str(error))
+
+                self.authenticated = True
+                self.last_error = None
+                self.last_authenticated_at = int(time.time())
                 await self._send(22, {"settings": {"user": {"HIDDEN": True}}})
-                self.connected = True
-                
-                # Запускаем пинг
+
                 keepalive_task = asyncio.create_task(self._keepalive_loop())
-                
-                # Слушаем сообщения
                 await self._recv_loop()
-                
-            except websockets.exceptions.ConnectionClosed as e:
-                logger.warning(f"Connection closed by server: {e}")
+
+            except websockets.exceptions.ConnectionClosed as exc:
+                logger.warning("Connection closed by server: %s", exc)
                 raise
             finally:
                 self.connected = False
-                if 'keepalive_task' in locals():
+                self.authenticated = False
+                self.ws = None
+                self._fail_pending(ConnectionError("MAX WebSocket disconnected"))
+                if keepalive_task:
                     keepalive_task.cancel()
+                    await asyncio.gather(keepalive_task, return_exceptions=True)
 
     async def _keepalive_loop(self):
-        """Пинг каждые 30 секунд для поддержания сессии."""
+        """Send periodic MAX pings to keep the session alive."""
         while True:
-            await asyncio.sleep(30)
+            await asyncio.sleep(MAX_KEEPALIVE_INTERVAL_SECONDS)
             if self.connected:
                 try:
                     await self._send(1, {"interactive": False})
+                    self.last_keepalive_at = int(time.time())
                     logger.debug("Ping sent")
-                except Exception:
+                except Exception as exc:
+                    logger.warning("Keepalive failed: %s", exc)
                     break
 
     async def _recv_loop(self):
@@ -154,13 +273,12 @@ class MaxWebsocketClient:
                 packet = json.loads(msg_text)
                 seq = packet.get("seq")
                 payload = packet.get("payload", {})
-                
+
                 if seq in self._pending_requests:
                     self._pending_requests[seq].set_result(packet)
                     del self._pending_requests[seq]
                     continue
-                
-                # Парсинг входящих сообщений
+
                 if "message" in payload and isinstance(payload["message"], dict):
                     msg = payload["message"]
                     chat_id = payload.get("chatId") or msg.get("chatId")
@@ -168,14 +286,22 @@ class MaxWebsocketClient:
                     sender_id = msg.get("sender", 0)
                     msg_id = msg.get("id", "")
                     ts = msg.get("time", 0)
-                    
+
                     if text and msg_id:
-                        # Передаем в роутер команд
-                        # Используем create_task чтобы не блокировать цикл чтения
-                        asyncio.create_task(
-                            self.dispatcher.process_message(self, msg_id, text, sender_id, ts)
+                        self.last_message_at = int(time.time())
+                        logger.debug("Incoming message %s from chat %s", msg_id, chat_id)
+                        task = asyncio.create_task(
+                            self.dispatcher.process_message(
+                                self,
+                                msg_id,
+                                text,
+                                sender_id,
+                                ts,
+                                chat_id=chat_id,
+                            )
                         )
+                        self._track_handler_task(task)
             except json.JSONDecodeError:
-                pass
-            except Exception as e:
-                logger.error(f"Error handling message: {e}")
+                logger.warning("Received non-JSON WebSocket packet")
+            except Exception as exc:
+                logger.error("Error handling message: %s", exc)

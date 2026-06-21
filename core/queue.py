@@ -1,64 +1,96 @@
 import asyncio
 import logging
 import random
+from dataclasses import dataclass
+
+from core.config import QUEUE_PUT_TIMEOUT_SECONDS, QUEUE_RETRY_DELAY_SECONDS, QUEUE_SEND_RETRIES
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass(frozen=True)
+class QueuedMessage:
+    text: str
+    attempts: int = 0
+
+
 class MessageQueue:
-    """
-    Очередь сообщений с Rate Limiting и имитацией "человеческих" задержек.
-    Гарантирует, что бот не отправит 10 сообщений за 1 секунду.
-    """
-    def __init__(self, send_func, min_delay=3.0, max_delay=7.0):
-        self.queue = asyncio.Queue()
+    """Rate-limited outgoing message queue with retry instead of silent drops."""
+
+    def __init__(self, send_func, min_delay=3.0, max_delay=7.0, max_size=100):
+        self.queue = asyncio.Queue(maxsize=max_size)
         self.send_func = send_func
         self.min_delay = min_delay
         self.max_delay = max_delay
+        self.max_size = max_size
         self._worker_task = None
 
     def start(self):
-        if not self._worker_task:
+        if not self._worker_task or self._worker_task.done():
             self._worker_task = asyncio.create_task(self._worker_loop())
             logger.info("MessageQueue worker started.")
 
-    def stop(self):
+    async def stop(self):
         if self._worker_task:
             self._worker_task.cancel()
+            await asyncio.gather(self._worker_task, return_exceptions=True)
             self._worker_task = None
 
     async def put(self, text: str):
-        """Добавляет сообщение в очередь на отправку."""
-        await self.queue.put(text)
-        logger.debug(f"Message queued. Queue size: {self.queue.qsize()}")
+        """Add a message to the outgoing queue."""
+        message = QueuedMessage(text=text)
+        try:
+            await asyncio.wait_for(self.queue.put(message), timeout=QUEUE_PUT_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError("Outgoing message queue is full") from exc
+        logger.debug("Message queued. Queue size: %s", self.queue.qsize())
+
+    def stats(self):
+        return {
+            "size": self.queue.qsize(),
+            "max_size": self.max_size,
+            "worker_running": bool(self._worker_task and not self._worker_task.done()),
+        }
+
+    async def _requeue_or_drop(self, message: QueuedMessage, error: Exception):
+        if message.attempts >= QUEUE_SEND_RETRIES:
+            logger.error("Dropping message after %s retries: %s", message.attempts, error)
+            return
+
+        delay = QUEUE_RETRY_DELAY_SECONDS * (message.attempts + 1)
+        logger.warning(
+            "Failed to send queued message, retry %s/%s in %.1fs: %s",
+            message.attempts + 1,
+            QUEUE_SEND_RETRIES,
+            delay,
+            error,
+        )
+        await asyncio.sleep(delay)
+        await self.queue.put(QueuedMessage(text=message.text, attempts=message.attempts + 1))
 
     async def _worker_loop(self):
         while True:
+            message = await self.queue.get()
             try:
-                # Берем сообщение из очереди
-                text = await self.queue.get()
-                
-                # Если накопился спам, делаем жесткую паузу (Анти-бан)
                 if self.queue.qsize() > 5:
-                    logger.warning(f"Queue is overloaded ({self.queue.qsize()} msgs). Pausing for 30s to avoid ban.")
+                    logger.warning(
+                        "Queue is overloaded (%s messages). Pausing for 30s to avoid rate limits.",
+                        self.queue.qsize(),
+                    )
                     await asyncio.sleep(30)
-                
-                # Имитация задержки печатания
-                typing_delay = len(text) / 5.0 + random.uniform(self.min_delay, self.max_delay)
-                # Ограничиваем максимальную задержку, чтобы не ждать вечно
-                typing_delay = min(typing_delay, 15.0) 
-                
-                logger.info(f"Typing delay: {typing_delay:.2f}s...")
+
+                typing_delay = len(message.text) / 5.0 + random.uniform(
+                    self.min_delay,
+                    self.max_delay,
+                )
+                typing_delay = min(typing_delay, 15.0)
+
+                logger.info("Typing delay: %.2fs...", typing_delay)
                 await asyncio.sleep(typing_delay)
-                
-                # Отправляем
-                await self.send_func(text)
-                
-                # Помечаем задачу как выполненную
-                self.queue.task_done()
-                
+                await self.send_func(message.text)
             except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error in MessageQueue worker: {e}")
-                # Ждем перед следующей попыткой, чтобы не спамить лог
-                await asyncio.sleep(2)
+                raise
+            except Exception as exc:
+                await self._requeue_or_drop(message, exc)
+            finally:
+                self.queue.task_done()

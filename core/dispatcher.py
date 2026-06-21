@@ -1,62 +1,79 @@
 import logging
 
+from core.config import COMMAND_PREFIX
+
 logger = logging.getLogger(__name__)
 
+
 class Dispatcher:
-    """
-    Роутер команд и обработчик событий.
-    Реализует паттерн Command Router.
-    """
+    """Command router and default message handler."""
+
     def __init__(self, admin_ids):
-        self.admin_ids = [int(x) for x in admin_ids if x.strip()]
+        self.admin_ids = [int(item) for item in admin_ids]
         self.commands = {}
+        self.bootstrap_commands = set()
         self.default_handler = None
 
+    def normalize_trigger(self, trigger: str) -> str:
+        return trigger.strip().lower().removeprefix(COMMAND_PREFIX)
+
     def register_command(self, trigger: str, handler):
-        """Регистрирует функцию-обработчик для конкретной команды."""
-        self.commands[trigger] = handler
+        """Register a command handler. Prefix is optional."""
+        normalized = self.normalize_trigger(trigger)
+        if not normalized:
+            raise ValueError("Command trigger cannot be empty")
+        self.commands[normalized] = handler
+
+    def register_bootstrap_command(self, trigger: str, handler):
+        """Register an id-discovery command that is allowed while ADMIN_IDS is empty."""
+        self.register_command(trigger, handler)
+        self.bootstrap_commands.add(self.normalize_trigger(trigger))
 
     def set_default_handler(self, handler):
-        """Регистрирует функцию для обработки сообщений, не являющихся командами (например, транзакций)."""
+        """Register handler for non-command messages."""
         self.default_handler = handler
 
     def is_admin(self, sender_id: int) -> bool:
-        """Проверяет, является ли пользователь администратором."""
-        # Если список пуст, разрешаем всем (или никому). Для безопасности лучше никому.
         if not self.admin_ids:
             return False
-        return sender_id in self.admin_ids
+        return int(sender_id) in self.admin_ids
 
-    async def process_message(self, client, msg_id, text, sender_id, timestamp):
-        """Главный метод маршрутизации."""
+    async def process_message(self, client, msg_id, text, sender_id, timestamp, chat_id=None):
+        """Route a single incoming message."""
         if not text:
             return
 
         text_trimmed = text.strip()
-        
-        # Обработка команд
-        if text_trimmed.startswith("!"):
-            # Парсим саму команду и аргументы
+        if not text_trimmed:
+            return
+
+        if text_trimmed.startswith(COMMAND_PREFIX):
             parts = text_trimmed.split(maxsplit=1)
-            trigger = parts[0].lower()
+            trigger = self.normalize_trigger(parts[0])
             args = parts[1] if len(parts) > 1 else ""
 
-            if trigger in self.commands:
-                # Проверка прав доступа для команд
-                if not self.is_admin(sender_id):
-                    logger.warning(f"Unauthorized command '{trigger}' from user {sender_id}. Ignoring.")
-                    return
-                
-                logger.info(f"Executing command '{trigger}' from admin {sender_id}")
-                try:
-                    await self.commands[trigger](client, args, sender_id)
-                except Exception as e:
-                    logger.error(f"Error executing command {trigger}: {e}")
+            handler = self.commands.get(trigger)
+            if not handler:
+                logger.info("Unknown command '%s' from user %s", trigger, sender_id)
                 return
 
-        # Если это не команда, передаем в default_handler (AI parser)
+            bootstrap_allowed = not self.admin_ids and trigger in self.bootstrap_commands
+            if not bootstrap_allowed and not self.is_admin(sender_id):
+                logger.warning("Unauthorized command '%s' from user %s. Ignoring.", trigger, sender_id)
+                return
+
+            if chat_id and not getattr(client, "target_chat_id", 0):
+                client.target_chat_id = int(chat_id)
+
+            logger.info("Executing command '%s' from user %s", trigger, sender_id)
+            try:
+                await handler(client, args, sender_id, {"chat_id": chat_id, "msg_id": msg_id})
+            except Exception as exc:
+                logger.error("Error executing command %s: %s", trigger, exc)
+            return
+
         if self.default_handler:
             try:
                 await self.default_handler(client, msg_id, text_trimmed, sender_id, timestamp)
-            except Exception as e:
-                logger.error(f"Error in default handler: {e}")
+            except Exception as exc:
+                logger.error("Error in default handler: %s", exc)
