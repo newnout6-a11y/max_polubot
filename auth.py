@@ -38,7 +38,7 @@ async def main():
     async def _ready(c):
         print(f"\nУспешный вход в MAX!")
         
-        session = c.session
+        session = c._app.session
         if not session or not session.token:
             print("Ошибка: не удалось получить токен сессии.")
             await c.stop()
