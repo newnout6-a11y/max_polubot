@@ -347,14 +347,25 @@ async def watchdog_processor(client: MaxWebsocketClient):
 
 
 async def cron_weekly_report(queue):
+    client = runtime.get("client")
+    target_chat_id = getattr(client, "target_chat_id", None) if client else None
+
+    class TargetQueue:
+        def __init__(self, message_queue, destination):
+            self._message_queue = message_queue
+            self._destination = destination
+
+        async def put(self, text, chat_id=None):
+            destination = chat_id if chat_id is not None else self._destination
+            await self._message_queue.put(text, chat_id=destination)
+
     class DummyClient:
-        def __init__(self, message_queue):
+        def __init__(self, message_queue, destination):
             self.queue = message_queue
             self.runtime_settings = runtime.get("settings")
-            client = runtime.get("client")
-            self.target_chat_id = getattr(client, "target_chat_id", 0) if client else 0
+            self.target_chat_id = destination
 
-    dummy = DummyClient(queue)
+    dummy = DummyClient(TargetQueue(queue, target_chat_id), target_chat_id)
     await cmd_parse_finance(dummy, "\u043d\u0435\u0434\u0435\u043b\u044f", 0)
     await cmd_stata(dummy, "", 0)
 
@@ -451,10 +462,10 @@ async def main():
     client.reply_chat_id = None
 
     async def _send_wrapper(text, chat_id=None):
-        destination = int(chat_id or client.target_chat_id or 0)
-        if not destination:
+        if chat_id is None:
             logger.warning("Dropping outgoing message because no destination chat is configured.")
             return
+        destination = int(chat_id)
         await client.send_message(destination, text)
 
     queue = MessageQueue(
@@ -464,7 +475,7 @@ async def main():
         max_size=QUEUE_MAX_SIZE,
         typing_chars_per_second=settings.get("queue_typing_chars_per_second"),
         typing_max_delay=settings.get("queue_typing_max_delay"),
-        default_chat_id_getter=lambda: getattr(client, "reply_chat_id", None) or client.target_chat_id,
+        default_chat_id_getter=lambda: getattr(client, "reply_chat_id", None),
     )
     client.queue = queue
     runtime["queue"] = queue

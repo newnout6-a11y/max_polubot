@@ -349,7 +349,9 @@ class MaxWebsocketClient:
 
         if "message" in payload and isinstance(payload["message"], dict):
             msg = payload["message"]
-            chat_id = payload.get("chatId") or msg.get("chatId")
+            chat_id = payload.get("chatId")
+            if chat_id is None:
+                chat_id = msg.get("chatId")
             text = msg.get("text", "")
             sender_id = msg.get("sender", 0)
             msg_id = msg.get("id", "")

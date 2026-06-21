@@ -64,7 +64,7 @@ class Dispatcher:
 
             logger.info("Executing command '%s' from user %s", trigger, sender_id)
             previous_reply_chat_id = getattr(client, "reply_chat_id", None)
-            client.reply_chat_id = int(chat_id) if chat_id else None
+            client.reply_chat_id = int(chat_id) if chat_id is not None else None
             try:
                 await handler(client, args, sender_id, {"chat_id": chat_id, "msg_id": msg_id})
             except Exception as exc:

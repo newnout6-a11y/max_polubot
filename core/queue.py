@@ -60,7 +60,7 @@ class MessageQueue:
         """Add a message to the outgoing queue."""
         if chat_id is None and self.default_chat_id_getter:
             chat_id = self.default_chat_id_getter()
-        message = QueuedMessage(text=text, chat_id=int(chat_id) if chat_id else None)
+        message = QueuedMessage(text=text, chat_id=int(chat_id) if chat_id is not None else None)
         try:
             await asyncio.wait_for(self.queue.put(message), timeout=QUEUE_PUT_TIMEOUT_SECONDS)
         except asyncio.TimeoutError as exc:
