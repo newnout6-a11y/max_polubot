@@ -78,6 +78,11 @@ GENERAL_AI_INSTRUCTIONS = (
     "You are a helpful assistant inside a MAX chat bot. "
     "Answer concisely, in Russian by default, unless the user asks otherwise."
 )
+GENERAL_AI_JSON_INSTRUCTIONS = (
+    "Return only valid JSON with this schema: "
+    '{"answer":"short helpful answer as a string"}. '
+    "Answer in Russian by default, unless the user asks otherwise."
+)
 
 
 def _setting(settings, key, default):
@@ -187,6 +192,19 @@ def _prompt(text: str) -> str:
 
 def _plain_prompt(text: str) -> str:
     return text.strip()
+
+
+def _answer_prompt(text: str) -> str:
+    return (
+        "Return only valid JSON. "
+        "Schema: {\"answer\":\"string\"}. "
+        "User question: "
+        f"{json.dumps(text, ensure_ascii=False)}"
+    )
+
+
+def _is_byesu_base_url(base_url: str) -> bool:
+    return "api.byesu.com" in str(base_url).lower()
 
 
 async def _parse_with_gemini(text: str, api_key: str, model: str) -> List[Transaction]:
@@ -415,18 +433,22 @@ async def ask_ai(question: str, settings=None) -> str:
 
     if config["wire_api"] == "responses":
         try:
-            return await _parse_with_responses_api(
-                prompt,
+            content = await _parse_with_responses_api(
+                _answer_prompt(prompt),
                 config["api_key"],
                 config["model"],
                 config["base_url"],
                 config["reasoning_effort"],
                 config["disable_response_storage"],
-                GENERAL_AI_INSTRUCTIONS,
-                json_mode=False,
+                GENERAL_AI_JSON_INSTRUCTIONS,
+                json_mode=True,
             )
+            answer = str(_loads_json_object(content).get("answer", "")).strip()
+            if not answer:
+                raise AIProviderError("responses API returned empty answer")
+            return answer
         except AIProviderError as exc:
-            if exc.status_code and exc.status_code >= 500:
+            if exc.status_code and exc.status_code >= 500 and not _is_byesu_base_url(config["base_url"]):
                 logger.warning(
                     "Responses API failed for general AI, falling back to chat_completions: %s",
                     exc,
