@@ -304,6 +304,47 @@ def _extract_response_text(data: dict) -> str:
     raise RuntimeError("Responses API returned no output text")
 
 
+async def _extract_response_text_from_sse(response: httpx.Response, provider: str) -> str:
+    parts: list[str] = []
+    last_error = ""
+
+    async for line in response.aiter_lines():
+        if not line or not line.startswith("data:"):
+            continue
+
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            continue
+
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            last_error = _short_body(payload)
+            continue
+
+        event_type = event.get("type")
+        if event_type == "response.output_text.delta" and isinstance(event.get("delta"), str):
+            parts.append(event["delta"])
+            continue
+
+        if event_type in {"response.failed", "response.incomplete"}:
+            error = event.get("error") or event.get("response", {}).get("error") or event
+            last_error = _short_body(json.dumps(error, ensure_ascii=False))
+
+        if event_type == "error":
+            last_error = _short_body(json.dumps(event, ensure_ascii=False))
+
+    text = "".join(parts).strip()
+    if text:
+        return text
+
+    raise AIProviderError(
+        f"{provider} streaming API returned no output text: {last_error or 'empty stream'}",
+        status_code=response.status_code,
+        response_body=last_error,
+    )
+
+
 def _loads_json_object(text: str) -> dict:
     value = (text or "").strip()
     try:
@@ -335,7 +376,10 @@ async def _parse_with_responses_api(
         payload = {
             "model": model,
             "instructions": instructions,
-            "input": prompt,
+            "input": [
+                {"role": "user", "content": prompt},
+            ],
+            "stream": True,
         }
     else:
         payload = {
@@ -355,14 +399,21 @@ async def _parse_with_responses_api(
 
     if is_byesu:
         logger.info(
-            "Byesu responses payload: keys=%s json_mode=%s has_reasoning=%s has_store=%s",
+            "Byesu responses payload: keys=%s input_type=%s json_mode=%s has_reasoning=%s has_store=%s",
             sorted(payload.keys()),
+            type(payload.get("input")).__name__,
             json_mode,
             "reasoning" in payload,
             "store" in payload,
         )
 
     async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT_SECONDS) as client:
+        if is_byesu:
+            headers["Accept"] = "text/event-stream"
+            async with client.stream("POST", url, headers=headers, json=payload) as response:
+                _raise_ai_status(response, "responses")
+                return await _extract_response_text_from_sse(response, "responses")
+
         response = await client.post(url, headers=headers, json=payload)
         _raise_ai_status(response, "responses")
         data = _response_json(response, "responses")
@@ -454,16 +505,16 @@ async def ask_ai(question: str, settings=None) -> str:
     if config["wire_api"] == "responses":
         try:
             content = await _parse_with_responses_api(
-                _answer_prompt(prompt),
+                prompt,
                 config["api_key"],
                 config["model"],
                 config["base_url"],
                 config["reasoning_effort"],
                 config["disable_response_storage"],
-                GENERAL_AI_JSON_INSTRUCTIONS,
-                json_mode=True,
+                GENERAL_AI_INSTRUCTIONS,
+                json_mode=False,
             )
-            answer = str(_loads_json_object(content).get("answer", "")).strip()
+            answer = content.strip()
             if not answer:
                 raise AIProviderError("responses API returned empty answer")
             return answer
