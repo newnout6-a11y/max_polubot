@@ -288,17 +288,15 @@ async def cmd_history(client, args, sender_id, context=None):
             if not text:
                 continue
 
-            sender_name = (
-                client._extract_sender_name(message)
-                if hasattr(client, "_extract_sender_name")
-                else None
-            )
-            logger.info("History msg %s: sender=%s sender_name=%s time=%s", msg_id, message.get("sender"), sender_name, timestamp)
+            sender_id = message.get("sender") or 0
+            sender_name = None
+            if hasattr(client, "_resolve_sender_name"):
+                sender_name = client._resolve_sender_name(sender_id)
 
             await Database.save_message(
                 msg_id,
                 text,
-                message.get("sender") or 0,
+                sender_id,
                 timestamp,
                 chat_id=target_chat_id,
                 sender_name=sender_name,
@@ -313,6 +311,16 @@ async def cmd_history(client, args, sender_id, context=None):
         if page_oldest <= since_ms:
             break
         from_ms = page_oldest - 1
+
+    unknown_ids = set()
+    for message in page:
+        sid = message.get("sender")
+        if sid and hasattr(client, "_resolve_sender_name"):
+            if not client._resolve_sender_name(sid):
+                unknown_ids.add(int(sid))
+    if unknown_ids and hasattr(client, "_fetch_user_names"):
+        logger.info("Fetching names for %d unknown users", len(unknown_ids))
+        await client._fetch_user_names(list(unknown_ids)[:50])
 
     await client.queue.put(
         "\n".join(

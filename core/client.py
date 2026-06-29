@@ -152,6 +152,49 @@ class MaxWebsocketClient:
             return None
         return self._user_cache.get(uid)
 
+    async def _fetch_user_names(self, user_ids: list[int]) -> dict[int, str]:
+        if not user_ids or self.ws is None:
+            return {}
+        try:
+            resp = await self._send(32, {"contactIds": user_ids}, require_authenticated=True)
+            contacts = (resp.get("payload") or {}).get("contacts") or []
+            result = {}
+            for user in contacts:
+                if not isinstance(user, dict):
+                    continue
+                uid = user.get("id")
+                if uid is None:
+                    continue
+                name = None
+                names_list = user.get("names")
+                if isinstance(names_list, list) and names_list:
+                    for n in names_list:
+                        if isinstance(n, dict):
+                            name = n.get("name") or n.get("firstName")
+                            if name:
+                                break
+                if not name:
+                    name = user.get("name") or user.get("firstName") or user.get("title")
+                if name:
+                    result[int(uid)] = str(name).strip()
+                    self._user_cache[int(uid)] = str(name).strip()
+            logger.info("Fetched %d user names, cache now: %d", len(result), len(self._user_cache))
+            return result
+        except Exception as exc:
+            logger.warning("Failed to fetch user names: %s", exc)
+            return {}
+
+    async def resolve_sender_name(self, sender_id) -> str | None:
+        name = self._resolve_sender_name(sender_id)
+        if name:
+            return name
+        try:
+            uid = int(sender_id)
+        except (TypeError, ValueError):
+            return None
+        fetched = await self._fetch_user_names([uid])
+        return fetched.get(uid)
+
     def _fail_pending(self, exc):
         for seq, future in list(self._pending_requests.items()):
             if not future.done():
@@ -483,25 +526,34 @@ class MaxWebsocketClient:
                 chat_id = msg.get("chatId")
             text = msg.get("text", "")
             sender_id = msg.get("sender", 0)
-            sender_name = self._resolve_sender_name(sender_id) or self._extract_sender_name(msg, payload)
             msg_id = msg.get("id", "")
             ts = msg.get("time", 0)
 
             if text and msg_id:
                 self.last_message_at = int(time.time())
-                logger.info("Incoming message %s from chat %s: sender_id=%s sender_name=%s", msg_id, chat_id, sender_id, sender_name)
-                task = asyncio.create_task(
-                    self.dispatcher.process_message(
-                        self,
-                        msg_id,
-                        text,
-                        sender_id,
-                        ts,
-                        chat_id=chat_id,
-                        sender_name=sender_name,
+                sender_name = self._resolve_sender_name(sender_id)
+                if not sender_name and sender_id:
+                    task = asyncio.create_task(
+                        self._fetch_and_dispatch(sender_id, msg_id, text, ts, chat_id)
                     )
-                )
-                self._track_handler_task(task)
+                    self._track_handler_task(task)
+                else:
+                    logger.info("Incoming message %s from chat %s: sender_id=%s sender_name=%s", msg_id, chat_id, sender_id, sender_name)
+                    task = asyncio.create_task(
+                        self.dispatcher.process_message(
+                            self, msg_id, text, sender_id, ts,
+                            chat_id=chat_id, sender_name=sender_name,
+                        )
+                    )
+                    self._track_handler_task(task)
+
+    async def _fetch_and_dispatch(self, sender_id, msg_id, text, ts, chat_id):
+        sender_name = await self.resolve_sender_name(sender_id)
+        logger.info("Incoming message %s from chat %s: sender_id=%s sender_name=%s", msg_id, chat_id, sender_id, sender_name)
+        await self.dispatcher.process_message(
+            self, msg_id, text, sender_id, ts,
+            chat_id=chat_id, sender_name=sender_name,
+        )
 
     @staticmethod
     def _extract_sender_name(message: dict, payload: dict | None = None) -> str | None:
