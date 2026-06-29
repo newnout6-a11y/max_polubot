@@ -48,7 +48,15 @@ def _packet(seq, opcode, payload):
 async def _send_recv(ws, seq, opcode, payload):
     await ws.send_str(json.dumps(_packet(seq, opcode, payload), ensure_ascii=False))
     while True:
-        raw = await asyncio.wait_for(ws.recv_str(), timeout=SESSION_CHECK_TIMEOUT_SECONDS)
+        result = await asyncio.wait_for(ws.recv(), timeout=SESSION_CHECK_TIMEOUT_SECONDS)
+        if isinstance(result, tuple):
+            raw = result[0]
+        else:
+            raw = result
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        if not raw or not raw.strip():
+            continue
         message = json.loads(raw)
         if message.get("seq") == seq:
             return message

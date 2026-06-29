@@ -190,10 +190,18 @@ class MaxWebsocketClient:
         try:
             await self.ws.send_str(json.dumps(req, ensure_ascii=False))
             while True:
-                raw = await asyncio.wait_for(
-                    self.ws.recv_str(),
+                result = await asyncio.wait_for(
+                    self.ws.recv(),
                     timeout=MAX_REQUEST_TIMEOUT_SECONDS,
                 )
+                if isinstance(result, tuple):
+                    raw = result[0]
+                else:
+                    raw = result
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8")
+                if not raw or not raw.strip():
+                    continue
                 packet = json.loads(raw)
                 if packet.get("seq") == seq:
                     return packet
@@ -382,12 +390,20 @@ class MaxWebsocketClient:
 
     async def _recv_loop(self):
         while True:
-            raw = await self.ws.recv_str()
             try:
+                result = await self.ws.recv()
+                if isinstance(result, tuple):
+                    raw = result[0]
+                else:
+                    raw = result
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8")
+                if not raw or not raw.strip():
+                    continue
                 packet = json.loads(raw)
                 await self._handle_packet(packet)
             except json.JSONDecodeError:
-                logger.warning("Received non-JSON WebSocket packet")
+                logger.debug("Received non-JSON WebSocket frame (likely pong/control)")
             except Exception as exc:
                 logger.error("Error handling message: %s", exc)
 
