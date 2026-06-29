@@ -73,6 +73,7 @@ class StartupValidation:
 
 
 TARGET_CHAT_ID = _int_env("TARGET_CHAT_ID", 0)
+REPORT_CHAT_ID = _int_env("REPORT_CHAT_ID", 0)
 ADMIN_IDS = _csv_int_env("ADMIN_IDS")
 SESSION_FILE = _env("SESSION_FILE", "session.json")
 
@@ -223,6 +224,8 @@ def validate_startup_config() -> StartupValidation:
         errors.append("DATABASE_URL or NEON_DATABASE_URL is required")
     if not TARGET_CHAT_ID:
         warnings.append("TARGET_CHAT_ID is empty: use chat command to set target_chat_id")
+    if not REPORT_CHAT_ID:
+        warnings.append("REPORT_CHAT_ID is empty: weekly reports will be skipped. Set it to your Saved Messages chat_id")
     if not ADMIN_IDS:
         warnings.append("ADMIN_IDS is empty: only bootstrap id commands will be accepted")
     if AI_PROVIDER == "gemini" and not GEMINI_API_KEY:

@@ -56,6 +56,7 @@ from core.config import (
     QUEUE_TYPING_CHARS_PER_SECOND,
     QUEUE_TYPING_MAX_DELAY,
     READINESS_MAX_DISCONNECTED_SECONDS,
+    REPORT_CHAT_ID,
     REPORT_DAY_OF_WEEK,
     REPORT_HOUR,
     REPORT_MINUTE,
@@ -369,7 +370,10 @@ async def watchdog_processor(client: MaxWebsocketClient):
 
 async def cron_weekly_report(queue):
     client = runtime.get("client")
-    target_chat_id = getattr(client, "target_chat_id", None) if client else None
+    report_chat_id = getattr(client, "report_chat_id", None) if client else None
+    if not report_chat_id:
+        logger.warning("Weekly report skipped: REPORT_CHAT_ID is not set.")
+        return
 
     class TargetQueue:
         def __init__(self, message_queue, destination):
@@ -386,7 +390,7 @@ async def cron_weekly_report(queue):
             self.runtime_settings = runtime.get("settings")
             self.target_chat_id = destination
 
-    dummy = DummyClient(TargetQueue(queue, target_chat_id), target_chat_id)
+    dummy = DummyClient(TargetQueue(queue, report_chat_id), report_chat_id)
     await cmd_parse_finance(dummy, "\u043d\u0435\u0434\u0435\u043b\u044f", 0)
     await cmd_stata(dummy, "", 0)
 
@@ -425,6 +429,7 @@ def register_commands(dispatcher: Dispatcher):
 def default_runtime_settings():
     return {
         "target_chat_id": TARGET_CHAT_ID,
+        "report_chat_id": REPORT_CHAT_ID,
         "ai_provider": AI_PROVIDER,
         "gemini_api_key": GEMINI_API_KEY,
         "gemini_model": GEMINI_MODEL,
@@ -485,6 +490,7 @@ async def main():
 
     client.runtime_settings = settings
     client.target_chat_id = settings.get("target_chat_id")
+    client.report_chat_id = REPORT_CHAT_ID
     client.reply_chat_id = None
 
     async def _send_wrapper(text, chat_id=None):
@@ -492,6 +498,10 @@ async def main():
             logger.warning("Dropping outgoing message because no destination chat is configured.")
             return
         destination = int(chat_id)
+        target = int(getattr(client, "target_chat_id", 0) or 0)
+        if target and destination == target:
+            logger.warning("Dropping outgoing message to target chat %s (bot is read-only there).", destination)
+            return
         await client.send_message(destination, text)
 
     queue = MessageQueue(
