@@ -142,6 +142,7 @@ async def cmd_parse_finance(client, args, sender_id, context=None):
     tx_count = 0
     ai_calls = 0
     errors = []
+    found_tx = []
 
     async def parse_rows_batch(batch):
         nonlocal parsed_count, tx_count, ai_calls
@@ -165,6 +166,11 @@ async def cmd_parse_finance(client, args, sender_id, context=None):
             await Database.replace_finances(row["id"], transactions, row["timestamp"])
             parsed_count += 1
             tx_count += len(transactions)
+            for tx in transactions:
+                expl = getattr(tx, "explanation", "") or ""
+                direction = "расход" if tx.expense > 0 else "доход"
+                amount = tx.expense if tx.expense > 0 else tx.income
+                found_tx.append(f"- {tx.category}: {direction} {amount} — {expl}")
 
     for index in range(0, len(rows), batch_size):
         await parse_rows_batch(rows[index : index + batch_size])
@@ -177,6 +183,12 @@ async def cmd_parse_finance(client, args, sender_id, context=None):
         f"- \u0422\u0440\u0430\u043d\u0437\u0430\u043a\u0446\u0438\u0439: {tx_count}",
         f"- AI-\u0432\u044b\u0437\u043e\u0432\u043e\u0432: {ai_calls}",
     ]
+    if tx_count == 0:
+        lines.append("- \u0424\u0438\u043d\u0430\u043d\u0441\u043e\u0432\u044b\u0445 \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u0439 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e. AI \u043f\u0440\u043e\u0430\u043d\u0430\u043b\u0438\u0437\u0438\u0440\u043e\u0432\u0430\u043b \u0432\u0441\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f \u0438 \u043d\u0435 \u043d\u0430\u0448\u0451\u043b \u0443\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u0439 \u0434\u0435\u043d\u0435\u0433.")
+    elif found_tx:
+        lines.append("")
+        lines.append("\u041d\u0430\u0439\u0434\u0435\u043d\u043d\u044b\u0435 \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u0438:")
+        lines.extend(found_tx[:20])
     if errors:
         lines.append(f"- \u041e\u0448\u0438\u0431\u043a\u0430 AI: {errors[0]}")
     await client.queue.put("\n".join(lines))
@@ -371,9 +383,7 @@ async def cmd_messages(client, args, sender_id, context=None):
     for row in rows:
         parsed = "parsed" if row["is_parsed"] else "new"
         sender_name = str(row.get("sender_name") or "").strip()
-        sender_label = (
-            f"{sender_name} ({row['sender_id']})" if sender_name else str(row["sender_id"])
-        )
+        sender_label = sender_name if sender_name else str(row["sender_id"])
         lines.append(
             f"- {_format_ts(row['timestamp'])} | {parsed} | "
             f"id={row['id']} | from={sender_label} | {_preview_text(row['text'])}"

@@ -59,6 +59,7 @@ class Transaction(BaseModel):
     category: str = Field(description="Lowercase category or item name.")
     expense: int = Field(default=0, ge=0, description="Amount spent in rubles, positive integer.")
     income: int = Field(default=0, ge=0, description="Amount earned in rubles, positive integer.")
+    explanation: str = Field(default="", description="Brief explanation of why this is a financial operation, citing the exact words from the message.")
 
     @field_validator("category")
     @classmethod
@@ -193,12 +194,16 @@ def _raise_ai_status(response: httpx.Response, provider: str):
 def _prompt(text: str, sender_name: str | None = None) -> str:
     sender_line = f"От: {sender_name}\n" if sender_name else ""
     return (
-        "Верни только JSON. Извлеки финансовые операции из сообщения чата. "
+        "Верни только JSON. Проанализируй сообщение чата и извлеки финансовые операции. "
         "Схема ответа: "
-        '{"transactions":[{"category":"string","expense":0,"income":0}]}. '
-        'Если в сообщении нет расхода или дохода, верни {"transactions":[]}. '
-        "Расход: купил, потратил, оплатил, списали, минус, spent, paid. "
-        "Доход: получил, доход, зарплата, плюс, зачислили, received. "
+        '{"transactions":[{"category":"string","expense":0,"income":0,"explanation":"string"}]}. '
+        'Если в сообщении нет финансовых операций, верни {"transactions":[]}. '
+        "Финансовая операция — это любое упоминание денег: покупка, оплата, перевод, "
+        "получение, списание, долг, возврат, зарплата, аренда, коммуналка и т.д. "
+        "Не используй жёсткий список ключевых слов — анализируй контекст. "
+        "Например, 'отдал 500 за обед' — это расход 500, 'принесли 3000 аванс' — доход 3000. "
+        "Если сообщение не содержит чисел или упоминания денег — это не финансовая операция. "
+        "В поле explanation укажи цитату из сообщения, которая подтверждает операцию. "
         "Не придумывай суммы. Сообщение: "
         f"{sender_line}{json.dumps(text, ensure_ascii=False)}"
     )
@@ -214,13 +219,16 @@ def _batch_prompt(messages: list[dict]) -> str:
         for message in messages
     ]
     return (
-        "Верни только JSON. Извлеки финансовые операции из списка сообщений чата. "
+        "Верни только JSON. Проанализируй список сообщений чата и извлеки финансовые операции. "
         "Схема ответа: "
-        '{"messages":[{"message_id":"string","transactions":[{"category":"string","expense":0,"income":0}]}]}. '
+        '{"messages":[{"message_id":"string","transactions":[{"category":"string","expense":0,"income":0,"explanation":"string"}]}]}. '
         "Для каждого входного message_id верни ровно один объект в messages. "
-        'Если в сообщении нет расхода или дохода, верни "transactions":[] для этого message_id. '
-        "Расход: купил, потратил, оплатил, списали, минус, spent, paid. "
-        "Доход: получил, доход, зарплата, плюс, зачислили, received. "
+        "Если в сообщении нет финансовых операций, верни \"transactions\":[] для этого message_id. "
+        "Финансовая операция — это любое упоминание денег: покупка, оплата, перевод, "
+        "получение, списание, долг, возврат, зарплата, аренда, коммуналка и т.д. "
+        "Не используй жёсткий список ключевых слов — анализируй контекст. "
+        "Если сообщение не содержит чисел или упоминания денег — это не финансовая операция. "
+        "В поле explanation укажи цитату из сообщения, которая подтверждает операцию. "
         "Не придумывай суммы и не смешивай разные message_id. "
         "Сообщения JSON: "
         f"{json.dumps(payload, ensure_ascii=False)}"
