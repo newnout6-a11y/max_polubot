@@ -241,7 +241,7 @@ def _answer_prompt(text: str) -> str:
 
 
 def _is_byesu_base_url(base_url: str) -> bool:
-    return "api.byesu.com" in str(base_url).lower()
+    return "byesu.com" in str(base_url).lower()
 
 
 async def _parse_with_gemini(text: str, api_key: str, model: str, sender_name: str | None = None) -> List[Transaction]:
@@ -499,7 +499,9 @@ async def _parse_with_responses_api(
         if is_byesu:
             headers["Accept"] = "text/event-stream"
             async with client.stream("POST", url, headers=headers, json=payload) as response:
-                _raise_ai_status(response, "responses")
+                if response.status_code >= 400:
+                    await response.aread()
+                    _raise_ai_status(response, "responses")
                 return await _extract_response_text_from_sse(response, "responses")
 
         response = await client.post(url, headers=headers, json=payload)
