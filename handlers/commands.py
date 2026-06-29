@@ -385,8 +385,7 @@ async def cmd_messages(client, args, sender_id, context=None):
         sender_name = str(row.get("sender_name") or "").strip()
         sender_label = sender_name if sender_name else str(row["sender_id"])
         lines.append(
-            f"- {_format_ts(row['timestamp'])} | {parsed} | "
-            f"id={row['id']} | from={sender_label} | {_preview_text(row['text'])}"
+            f"- {_format_ts(row['timestamp'])} | {sender_label} | {_preview_text(row['text'])}"
         )
 
     await client.queue.put("\n".join(lines))
