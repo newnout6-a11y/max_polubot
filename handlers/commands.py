@@ -266,6 +266,9 @@ async def cmd_history(client, args, sender_id, context=None):
         pages += 1
         page_oldest = None
         page_new_ids = 0
+        in_range = 0
+
+        page_sender_ids = set()
         for message in page:
             msg_id = str(message.get("id") or "")
             if not msg_id or msg_id in seen_ids:
@@ -281,6 +284,31 @@ async def cmd_history(client, args, sender_id, context=None):
                 page_oldest = timestamp if page_oldest is None else min(page_oldest, timestamp)
 
             scanned += 1
+            if timestamp and timestamp < since_ms:
+                continue
+
+            in_range += 1
+            sid = message.get("sender") or 0
+            if sid:
+                page_sender_ids.add(int(sid))
+
+        if page_sender_ids and hasattr(client, "_fetch_user_names"):
+            unknown = [sid for sid in page_sender_ids if not client._resolve_sender_name(sid)]
+            if unknown:
+                logger.info("Fetching names for %d unknown users", len(unknown))
+                await client._fetch_user_names(unknown[:50])
+
+        for message in page:
+            msg_id = str(message.get("id") or "")
+            if not msg_id or msg_id not in seen_ids:
+                if msg_id:
+                    seen_ids.add(msg_id)
+
+            try:
+                timestamp = int(message.get("time") or 0)
+            except (TypeError, ValueError):
+                timestamp = 0
+
             if timestamp and timestamp < since_ms:
                 continue
 
@@ -311,16 +339,6 @@ async def cmd_history(client, args, sender_id, context=None):
         if page_oldest <= since_ms:
             break
         from_ms = page_oldest - 1
-
-    unknown_ids = set()
-    for message in page:
-        sid = message.get("sender")
-        if sid and hasattr(client, "_resolve_sender_name"):
-            if not client._resolve_sender_name(sid):
-                unknown_ids.add(int(sid))
-    if unknown_ids and hasattr(client, "_fetch_user_names"):
-        logger.info("Fetching names for %d unknown users", len(unknown_ids))
-        await client._fetch_user_names(list(unknown_ids)[:50])
 
     await client.queue.put(
         "\n".join(

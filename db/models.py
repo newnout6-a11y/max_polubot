@@ -168,7 +168,7 @@ class Database:
                     sender_name = COALESCE(EXCLUDED.sender_name, messages.sender_name),
                     timestamp = EXCLUDED.timestamp,
                     updated_at = EXCLUDED.updated_at
-                WHERE messages.is_parsed = FALSE
+                WHERE messages.is_parsed = FALSE OR (EXCLUDED.sender_name IS NOT NULL AND messages.sender_name IS NULL)
                 """,
                 (msg_id, text, chat_id, sender_id, sender_name, normalized_ts, int(time.time())),
             )
