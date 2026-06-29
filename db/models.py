@@ -318,9 +318,10 @@ class Database:
                 )
 
     @staticmethod
-    async def get_stats(start_timestamp):
+    async def get_stats(start_timestamp, end_timestamp=None):
         pool = Database._require_pool()
         normalized_start = normalize_unix_timestamp(start_timestamp)
+        normalized_end = normalize_unix_timestamp(end_timestamp or int(time.time()))
 
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
@@ -331,11 +332,11 @@ class Database:
                         COALESCE(SUM(expense), 0) AS total_expense,
                         COALESCE(SUM(income), 0) AS total_income
                     FROM finances
-                    WHERE date >= %s
+                    WHERE date >= %s AND date <= %s
                     GROUP BY category
                     ORDER BY total_expense DESC, total_income DESC, category ASC
                     """,
-                    (normalized_start,),
+                    (normalized_start, normalized_end),
                 )
                 stats = await cur.fetchall()
 
@@ -346,9 +347,9 @@ class Database:
                         COALESCE(SUM(expense), 0) AS exp,
                         COALESCE(SUM(income), 0) AS inc
                     FROM finances
-                    WHERE date >= %s
+                    WHERE date >= %s AND date <= %s
                     """,
-                    (normalized_start,),
+                    (normalized_start, normalized_end),
                 )
                 row = await cur.fetchone()
 

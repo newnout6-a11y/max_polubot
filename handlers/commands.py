@@ -1,4 +1,5 @@
 import logging
+import re
 import shlex
 import time
 from datetime import datetime, timezone, timedelta
@@ -47,31 +48,82 @@ async def cmd_ping(client, args, sender_id, context=None):
     await client.queue.put("\u041f\u043e\u043d\u0433! \u0411\u043e\u0442 \u043d\u0430 \u0441\u0432\u044f\u0437\u0438.")
 
 
-def _parse_stats_period(args: str) -> tuple[int, str]:
+def _parse_period(args: str) -> tuple[int, int, str]:
+    """Parse period from args. Returns (start_ts, end_ts, title).
+    
+    Formats:
+      01.06-30.06       — from 01.06 to 30.06 (current year, Moscow time)
+      01.06.2026-30.06.2026 — explicit year
+      7                 — last 7 days
+      неделя/месяц/день  — named periods
+    """
     normalized = (args or "").strip().lower()
-    if normalized in {"\u043c\u0435\u0441\u044f\u0446", "\u043c\u0435\u0441", "30", "30\u0434", "30d", "month"}:
-        return 30, "\u043c\u0435\u0441\u044f\u0446"
-    if normalized in {"\u0434\u0435\u043d\u044c", "1", "1\u0434", "1d", "day"}:
-        return 1, "\u0434\u0435\u043d\u044c"
-    raw_days = normalized.split()[0] if normalized else ""
-    raw_days = raw_days.removesuffix("\u0434").removesuffix("d")
+    if not normalized:
+        return _days_back(7, "неделю")
+
+    # Date range: DD.MM-DD.MM or DD.MM.YYYY-DD.MM.YYYY
+    date_range = re.match(r"^(\d{1,2}\.\d{1,2}(?:\.\d{4})?)-(\d{1,2}\.\d{1,2}(?:\.\d{4})?)", normalized)
+    if date_range:
+        start_str, end_str = date_range.group(1), date_range.group(2)
+        try:
+            start_ts, start_title = _parse_date_to_ts(start_str, is_start=True)
+            end_ts, end_title = _parse_date_to_ts(end_str, is_start=False)
+            return start_ts, end_ts, f"{start_title}—{end_title}"
+        except ValueError:
+            pass
+
+    # Named periods
+    if normalized in {"месяц", "мес", "30", "30д", "30d", "month"}:
+        return _days_back(30, "месяц")
+    if normalized in {"день", "1", "1д", "1d", "day"}:
+        return _days_back(1, "день")
+    if normalized in {"неделя", "неделю", "7", "7д", "7d", "week"}:
+        return _days_back(7, "неделю")
+
+    # N days
+    raw_days = normalized.split()[0]
+    raw_days = raw_days.removesuffix("д").removesuffix("d")
     if raw_days.isdigit():
         days = max(1, min(int(raw_days), HISTORY_MAX_DAYS))
-        return days, f"{days} \u0434\u043d."
-    return 7, "\u043d\u0435\u0434\u0435\u043b\u044e"
+        return _days_back(days, f"{days} дн.")
+
+    return _days_back(7, "неделю")
+
+
+def _days_back(days: int, title: str) -> tuple[int, int, str]:
+    now = datetime.now(MOSCOW_TZ)
+    start = now - timedelta(days=days)
+    start_ts = int(start.timestamp())
+    end_ts = int(now.timestamp())
+    return start_ts, end_ts, title
+
+
+def _parse_date_to_ts(date_str: str, is_start: bool) -> tuple[int, str]:
+    """Parse DD.MM or DD.MM.YYYY to Moscow timezone timestamp."""
+    parts = date_str.split(".")
+    day = int(parts[0])
+    month = int(parts[1])
+    year = int(parts[2]) if len(parts) > 2 else datetime.now(MOSCOW_TZ).year
+
+    if is_start:
+        dt = datetime(year, month, day, 0, 0, 0, tzinfo=MOSCOW_TZ)
+    else:
+        dt = datetime(year, month, day, 23, 59, 59, tzinfo=MOSCOW_TZ)
+
+    title = dt.strftime("%d.%m.%Y")
+    return int(dt.timestamp()), title
 
 
 async def cmd_stata(client, args, sender_id, context=None):
-    period, title = _parse_stats_period(args)
-    start_ts = int(time.time()) - (period * 24 * 60 * 60)
+    start_ts, end_ts, title = _parse_period(args)
 
-    stats, total_exp, total_inc = await Database.get_stats(start_ts)
+    stats, total_exp, total_inc = await Database.get_stats(start_ts, end_ts)
 
     if not stats and total_exp == 0 and total_inc == 0:
-        await client.queue.put(f"\u0417\u0430 {title} \u043d\u0435\u0442 \u043d\u0438 \u043e\u0434\u043d\u043e\u0439 \u0437\u0430\u043f\u0438\u0441\u0438.")
+        await client.queue.put(f"За {title} нет ни одной записи.")
         return
 
-    lines = [f"\u0424\u0438\u043d\u0430\u043d\u0441\u043e\u0432\u0430\u044f \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 \u0437\u0430 {title}", ""]
+    lines = [f"Финансовая статистика за {title}", ""]
     for row in stats:
         cat = str(row["category"]).capitalize()
         exp = row["total_expense"] or 0
@@ -94,9 +146,8 @@ async def cmd_stata(client, args, sender_id, context=None):
     await client.queue.put("\n".join(lines))
 
 
-async def _parse_finance_period(args: str) -> tuple[int, str]:
-    period, title = _parse_stats_period(args)
-    return period, title
+async def _parse_finance_period(args: str) -> tuple[int, int, str]:
+    return _parse_period(args)
 
 
 async def cmd_parse_finance(client, args, sender_id, context=None):
@@ -105,23 +156,23 @@ async def cmd_parse_finance(client, args, sender_id, context=None):
         await client.queue.put("AI API key is not configured.")
         return
 
-    period, title = await _parse_finance_period(args)
-    start_ts = int(time.time()) - (period * 24 * 60 * 60)
+    start_ts, end_ts, title = _parse_period(args)
     target_chat_id = int(getattr(client, "target_chat_id", 0) or 0)
     if not target_chat_id:
         await client.queue.put(
-            f"\u0421\u043d\u0430\u0447\u0430\u043b\u0430 \u0437\u0430\u0434\u0430\u0439 target_chat_id: "
-            f"{COMMAND_PREFIX}\u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 target_chat_id here"
+            f"Сначала задай target_chat_id: "
+            f"{COMMAND_PREFIX}настройка target_chat_id here"
         )
         return
 
     normalized_args = (args or "").strip().lower()
     reparse_all = any(
         token in normalized_args.split()
-        for token in {"all", "reparse", "\u0432\u0441\u0435", "\u0432\u0441\u0451", "\u0437\u0430\u043d\u043e\u0432\u043e"}
+        for token in {"all", "reparse", "все", "всё", "заново"}
     )
     rows = await Database.get_messages_for_period(
         start_ts,
+        end_timestamp=end_ts,
         chat_id=target_chat_id,
         limit=500,
         only_unparsed=not reparse_all,
@@ -265,6 +316,7 @@ async def cmd_history(client, args, sender_id, context=None):
     scanned = 0
     saved = 0
     pages = 0
+    history_title = f"{days} дн."
 
     while scanned < HISTORY_MAX_MESSAGES:
         page = await client.fetch_chat_history(
@@ -588,25 +640,25 @@ async def cmd_wipe(client, args, sender_id, context=None):
 async def cmd_help(client, args, sender_id, context=None):
     prefix = COMMAND_PREFIX
     text = (
-        "\u041a\u043e\u043c\u0430\u043d\u0434\u044b MAX Polubot:\n"
-        "\u041f\u0438\u0448\u0438 \u0438\u0445 \u0432 \u0418\u0437\u0431\u0440\u0430\u043d\u043d\u043e\u0435, \u0430 target-\u0447\u0430\u0442 \u0431\u043e\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u0447\u0438\u0442\u0430\u0435\u0442.\n"
-        f"- {prefix}\u0438\u0441\u0442\u043e\u0440\u0438\u044f 10 - \u0441\u043a\u0430\u0447\u0430\u0442\u044c \u0438\u0441\u0442\u043e\u0440\u0438\u044e target-\u0447\u0430\u0442\u0430 \u0437\u0430 10 \u0434\u043d\u0435\u0439\n"
-        f"- {prefix}\u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f 20 - \u043f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d\u043d\u044b\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f target-\u0447\u0430\u0442\u0430\n"
-        f"- {prefix}\u0440\u0430\u0437\u043e\u0431\u0440\u0430\u0442\u044c 10 - AI-\u0440\u0430\u0437\u0431\u043e\u0440 \u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d\u043d\u044b\u0445 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439 \u0437\u0430 10 \u0434\u043d\u0435\u0439\n"
-        f"- {prefix}\u0440\u0430\u0437\u043e\u0431\u0440\u0430\u0442\u044c \u043d\u0435\u0434\u0435\u043b\u044f all - \u043f\u0435\u0440\u0435\u0440\u0430\u0437\u043e\u0431\u0440\u0430\u0442\u044c \u0432\u0441\u0451 \u0437\u0430 \u043f\u0435\u0440\u0438\u043e\u0434\n"
-        f"- {prefix}\u0441\u0442\u0430\u0442\u0430 / {prefix}\u0441\u0442\u0430\u0442\u0430 30 - \u0444\u0438\u043d\u0430\u043d\u0441\u043e\u0432\u0430\u044f \u0441\u0432\u043e\u0434\u043a\u0430\n"
-        f"- {prefix}ai \u0432\u043e\u043f\u0440\u043e\u0441 - \u0441\u043f\u0440\u043e\u0441\u0438\u0442\u044c AI \u043d\u0430\u043f\u0440\u044f\u043c\u0443\u044e\n"
-        f"- {prefix}\u0441\u0442\u0430\u0442\u0443\u0441 - \u0431\u044b\u0441\u0442\u0440\u044b\u0439 \u0441\u0442\u0430\u0442\u0443\u0441\n"
-        f"- {prefix}\u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 - \u0430\u043a\u0442\u0438\u0432\u043d\u044b\u0435 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438\n"
-        f"- {prefix}\u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 - \u043f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u043a\u043e\u043d\u0444\u0438\u0433; {prefix}\u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 key value - \u0438\u0437\u043c\u0435\u043d\u0438\u0442\u044c\n"
-        f"- {prefix}\u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 target_chat_id here - \u0437\u0430\u0434\u0430\u0442\u044c \u0447\u0430\u0442 \u0434\u043b\u044f \u0447\u0442\u0435\u043d\u0438\u044f (\u0431\u043e\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u0447\u0438\u0442\u0430\u0435\u0442)\n"
-        f"- {prefix}\u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 report_chat_id here - \u0437\u0430\u0434\u0430\u0442\u044c \u0447\u0430\u0442 \u0434\u043b\u044f \u043e\u0442\u0432\u0435\u0442\u043e\u0432 (\u043d\u0430\u043f\u0440. \u0418\u0437\u0431\u0440\u0430\u043d\u043d\u043e\u0435)\n"
-        f"- {prefix}\u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 ai_provider openai|deepseek|gemini - \u0441\u043c\u0435\u043d\u0438\u0442\u044c AI\n"
-        f"- {prefix}\u043e\u0447\u0438\u0441\u0442\u0438\u0442\u044c_ai - \u043e\u0447\u0438\u0441\u0442\u0438\u0442\u044c \u043e\u0447\u0435\u0440\u0435\u0434\u044c AI-\u0440\u0430\u0437\u0431\u043e\u0440\u0430\n"
-        f"- {prefix}\u0441\u0442\u0435\u0440\u0435\u0442\u044c - \u0443\u0434\u0430\u043b\u0438\u0442\u044c \u0432\u0441\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f \u0438 \u0444\u0438\u043d\u0430\u043d\u0441\u044b\n"
-        f"- {prefix}\u043a\u0442\u043e\u044f - \u043f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0442\u0432\u043e\u0439 MAX user id\n"
-        f"- {prefix}\u0447\u0430\u0442 - \u043f\u043e\u043a\u0430\u0437\u0430\u0442\u044c chat_id \u044d\u0442\u043e\u0433\u043e \u0447\u0430\u0442\u0430\n"
-        f"- {prefix}\u043f\u0438\u043d\u0433 - \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 \u0441\u0442\u0430\u0442\u0443\u0441\u0430\n"
-        f"- {prefix}\u0445\u0435\u043b\u043f - \u044d\u0442\u043e \u043c\u0435\u043d\u044e"
+        "Команды MAX Polubot:\n"
+        "Пиши их в Избранное, а target-чат бот только читает.\n"
+        "Период: 7 (дней), неделя, месяц, 01.06-30.06, 01.06.2026-30.06.2026\n"
+        f"- {prefix}история 10 — скачать историю за 10 дней\n"
+        f"- {prefix}сообщения 20 — показать сохранённые сообщения\n"
+        f"- {prefix}разобрать 01.06-29.06 — AI-разбор за период\n"
+        f"- {prefix}разобрать неделя all — переразобрать всё за период\n"
+        f"- {prefix}стата 01.06-29.06 — финансовая сводка за период\n"
+        f"- {prefix}ai вопрос — спросить AI напрямую\n"
+        f"- {prefix}статус — быстрый статус\n"
+        f"- {prefix}проверка — активные проверки\n"
+        f"- {prefix}настройка — показать конфиг; {prefix}настройка key value — изменить\n"
+        f"- {prefix}настройка target_chat_id here — чат для чтения (бот только читает)\n"
+        f"- {prefix}настройка report_chat_id here — чат для ответов (напр. Избранное)\n"
+        f"- {prefix}настройка ai_provider openai|deepseek|gemini — сменить AI\n"
+        f"- {prefix}стереть — удалить все сообщения и финансы\n"
+        f"- {prefix}ктоя — твой MAX user id\n"
+        f"- {prefix}чат — chat_id этого чата\n"
+        f"- {prefix}пинг — проверка статуса\n"
+        f"- {prefix}хелп — это меню"
     )
     await client.queue.put(text)
