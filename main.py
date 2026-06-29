@@ -4,6 +4,7 @@ import logging
 import os
 import time
 
+import httpx
 import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -314,6 +315,19 @@ async def background_ai_processor():
         await asyncio.sleep(AI_LOOP_INTERVAL_SECONDS)
 
 
+async def self_ping_loop():
+    """Ping own /health endpoint to prevent HF Space from sleeping."""
+    ping_url = f"http://127.0.0.1:{WEB_PORT}/health"
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                resp = await c.get(ping_url)
+                logger.debug("Self-ping: HTTP %s", resp.status_code)
+        except Exception as exc:
+            logger.warning("Self-ping failed: %s", exc)
+        await asyncio.sleep(300)
+
+
 async def watchdog_processor(client: MaxWebsocketClient):
     last_session_probe_at = 0
     while True:
@@ -508,6 +522,7 @@ async def main():
     scheduler.start()
     ai_task = asyncio.create_task(background_ai_processor(), name="ai_processor")
     watchdog_task = asyncio.create_task(watchdog_processor(client), name="watchdog")
+    ping_task = asyncio.create_task(self_ping_loop(), name="self_ping")
 
     config = uvicorn.Config(app, host=WEB_HOST, port=WEB_PORT, log_level="warning")
     server = uvicorn.Server(config)
@@ -529,8 +544,9 @@ async def main():
 
         ai_task.cancel()
         watchdog_task.cancel()
+        ping_task.cancel()
         server.should_exit = True
-        await asyncio.gather(ai_task, watchdog_task, web_task, return_exceptions=True)
+        await asyncio.gather(ai_task, watchdog_task, ping_task, web_task, return_exceptions=True)
         await Database.close()
 
 
