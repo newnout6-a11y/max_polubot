@@ -56,6 +56,7 @@ class MaxWebsocketClient:
         self.last_authenticated_at = None
         self.last_message_at = None
         self.last_keepalive_at = None
+        self._user_cache = {}
 
     def _get_seq(self):
         self.seq += 1
@@ -93,6 +94,50 @@ class MaxWebsocketClient:
         if SOCKS_PROXY_URL:
             kwargs["proxies"] = {"https": SOCKS_PROXY_URL, "http": SOCKS_PROXY_URL}
         return kwargs
+
+    def _build_user_cache(self, payload: dict):
+        self._user_cache.clear()
+        users = []
+
+        for key in ("users", "contacts"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                users.extend(value)
+
+        sync = payload.get("sync") or payload.get("syncState") or {}
+        if isinstance(sync, dict):
+            for key in ("users", "contacts"):
+                value = sync.get(key)
+                if isinstance(value, list):
+                    users.extend(value)
+
+        profile = payload.get("profile") or payload.get("me") or payload.get("user")
+        if isinstance(profile, dict):
+            users.append(profile)
+
+        for user in users:
+            if not isinstance(user, dict):
+                continue
+            uid = user.get("id") or user.get("userId") or user.get("contactId")
+            if uid is None:
+                continue
+            name = (
+                user.get("name")
+                or user.get("title")
+                or user.get("firstName")
+                or user.get("displayName")
+                or user.get("fullName")
+                or user.get("username")
+            )
+            if name:
+                self._user_cache[int(uid)] = str(name).strip()
+
+    def _resolve_sender_name(self, sender_id) -> str | None:
+        try:
+            uid = int(sender_id)
+        except (TypeError, ValueError):
+            return None
+        return self._user_cache.get(uid)
 
     def _fail_pending(self, exc):
         for seq, future in list(self._pending_requests.items()):
@@ -315,9 +360,9 @@ class MaxWebsocketClient:
                 {
                     "token": self.token,
                     "interactive": True,
-                    "chatsCount": 40,
-                    "chatsSync": 0,
-                    "contactsSync": 0,
+                    "chatsCount": 100,
+                    "chatsSync": 100,
+                    "contactsSync": 100,
                     "presenceSync": 0,
                     "draftsSync": 0,
                 },
@@ -331,6 +376,8 @@ class MaxWebsocketClient:
             self.authenticated = True
             self.last_error = None
             self.last_authenticated_at = int(time.time())
+            self._build_user_cache(sync_resp.get("payload") or {})
+            logger.info("User cache built: %d users", len(self._user_cache))
             await self._send_recv_direct(22, {"settings": {"user": {"HIDDEN": True}}})
 
             keepalive_task = asyncio.create_task(self._keepalive_loop())
@@ -418,15 +465,12 @@ class MaxWebsocketClient:
 
         if "message" in payload and isinstance(payload["message"], dict):
             msg = payload["message"]
-            logger.info("RAW message payload keys: %s", list(msg.keys()))
-            logger.info("RAW message sender field: %r", msg.get("sender"))
-            logger.info("RAW payload keys: %s", list(payload.keys()))
             chat_id = payload.get("chatId")
             if chat_id is None:
                 chat_id = msg.get("chatId")
             text = msg.get("text", "")
             sender_id = msg.get("sender", 0)
-            sender_name = self._extract_sender_name(msg, payload)
+            sender_name = self._resolve_sender_name(sender_id) or self._extract_sender_name(msg, payload)
             msg_id = msg.get("id", "")
             ts = msg.get("time", 0)
 
