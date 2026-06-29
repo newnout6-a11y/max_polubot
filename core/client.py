@@ -376,7 +376,11 @@ class MaxWebsocketClient:
             self.authenticated = True
             self.last_error = None
             self.last_authenticated_at = int(time.time())
-            self._build_user_cache(sync_resp.get("payload") or {})
+            sync_payload = sync_resp.get("payload") or {}
+            logger.info("Sync response keys: %s", list(sync_payload.keys()))
+            for k, v in sync_payload.items():
+                logger.info("Sync[%s] type=%s len=%s", k, type(v).__name__, len(v) if isinstance(v, (list, dict, str)) else v)
+            self._build_user_cache(sync_payload)
             logger.info("User cache built: %d users", len(self._user_cache))
             await self._send_recv_direct(22, {"settings": {"user": {"HIDDEN": True}}})
 
