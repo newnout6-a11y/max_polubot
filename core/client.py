@@ -57,6 +57,7 @@ class MaxWebsocketClient:
         self.last_message_at = None
         self.last_keepalive_at = None
         self._user_cache = {}
+        self._chat_cache = {}
 
     def _get_seq(self):
         self.seq += 1
@@ -97,6 +98,18 @@ class MaxWebsocketClient:
 
     def _build_user_cache(self, payload: dict):
         self._user_cache.clear()
+        self._chat_cache.clear()
+
+        chats = payload.get("chats") or []
+        if isinstance(chats, list):
+            for chat in chats:
+                if not isinstance(chat, dict):
+                    continue
+                cid = chat.get("id")
+                title = chat.get("title") or chat.get("name")
+                if cid is not None and title:
+                    self._chat_cache[int(cid)] = str(title).strip()
+
         users = []
 
         for key in ("contacts", "users"):
@@ -151,6 +164,13 @@ class MaxWebsocketClient:
         except (TypeError, ValueError):
             return None
         return self._user_cache.get(uid)
+
+    def _resolve_chat_name(self, chat_id) -> str | None:
+        try:
+            cid = int(chat_id)
+        except (TypeError, ValueError):
+            return None
+        return self._chat_cache.get(cid)
 
     async def _fetch_user_names(self, user_ids: list[int]) -> dict[int, str]:
         if not user_ids or self.ws is None:
@@ -433,7 +453,7 @@ class MaxWebsocketClient:
             self.last_error = None
             self.last_authenticated_at = int(time.time())
             self._build_user_cache(sync_resp.get("payload") or {})
-            logger.info("User cache built: %d users", len(self._user_cache))
+            logger.info("Caches built: %d users, %d chats", len(self._user_cache), len(self._chat_cache))
             await self._send_recv_direct(22, {"settings": {"user": {"HIDDEN": True}}})
 
             keepalive_task = asyncio.create_task(self._keepalive_loop())

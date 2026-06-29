@@ -376,12 +376,16 @@ async def cmd_messages(client, args, sender_id, context=None):
     limit = _parse_preview_limit(args)
     rows = await Database.get_recent_messages(target_chat_id, limit=limit)
     if not rows:
-        await client.queue.put("В БД пока нет сохранённых сообщений target-чата.")
+        await client.queue.put("В БД пока нет сохранённых сообщений.")
         return
 
-    lines = [f"Последние сохранённые сообщения target-чата ({len(rows)}):"]
+    chat_name = ""
+    if hasattr(client, "_resolve_chat_name"):
+        chat_name = client._resolve_chat_name(target_chat_id) or ""
+
+    header = f"Последние сообщения ({len(rows)})" if not chat_name else f"Последние сообщения из «{chat_name}» ({len(rows)})"
+    lines = [header]
     for row in rows:
-        parsed = "parsed" if row["is_parsed"] else "new"
         sender_name = str(row.get("sender_name") or "").strip()
         sender_label = sender_name if sender_name else str(row["sender_id"])
         lines.append(
