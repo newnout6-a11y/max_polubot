@@ -563,6 +563,15 @@ async def _apply_setting_side_effects(client, key, value):
         )
 
 
+async def cmd_wipe(client, args, sender_id, context=None):
+    result = await Database.wipe_all()
+    await client.queue.put(
+        f"\u0411\u0430\u0437\u0430 \u043e\u0447\u0438\u0449\u0435\u043d\u0430.\n"
+        f"- \u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439 \u0443\u0434\u0430\u043b\u0435\u043d\u043e: {result['messages']}\n"
+        f"- \u0424\u0438\u043d\u0430\u043d\u0441\u043e\u0432 \u0443\u0434\u0430\u043b\u0435\u043d\u043e: {result['finances']}"
+    )
+
+
 async def cmd_help(client, args, sender_id, context=None):
     prefix = COMMAND_PREFIX
     text = (
@@ -580,6 +589,7 @@ async def cmd_help(client, args, sender_id, context=None):
         f"- {prefix}\u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 target_chat_id here - \u0437\u0430\u0434\u0430\u0442\u044c target-\u0447\u0430\u0442\n"
         f"- {prefix}\u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 ai_provider openai|deepseek|gemini - \u0441\u043c\u0435\u043d\u0438\u0442\u044c AI\n"
         f"- {prefix}\u043e\u0447\u0438\u0441\u0442\u0438\u0442\u044c_ai - \u043e\u0447\u0438\u0441\u0442\u0438\u0442\u044c \u043e\u0447\u0435\u0440\u0435\u0434\u044c AI-\u0440\u0430\u0437\u0431\u043e\u0440\u0430\n"
+        f"- {prefix}\u0441\u0442\u0435\u0440\u0435\u0442\u044c - \u0443\u0434\u0430\u043b\u0438\u0442\u044c \u0432\u0441\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f \u0438 \u0444\u0438\u043d\u0430\u043d\u0441\u044b\n"
         f"- {prefix}\u043a\u0442\u043e\u044f - \u043f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0442\u0432\u043e\u0439 MAX user id\n"
         f"- {prefix}\u0447\u0430\u0442 - \u043f\u043e\u043a\u0430\u0437\u0430\u0442\u044c chat_id \u044d\u0442\u043e\u0433\u043e \u0447\u0430\u0442\u0430\n"
         f"- {prefix}\u043f\u0438\u043d\u0433 - \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 \u0441\u0442\u0430\u0442\u0443\u0441\u0430\n"

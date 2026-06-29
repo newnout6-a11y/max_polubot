@@ -25,6 +25,7 @@ from core.config import (
     COMMAND_ALIASES_CHECKS,
     COMMAND_ALIASES_CHAT,
     COMMAND_ALIASES_CLEAR_AI,
+    COMMAND_ALIASES_WIPE,
     COMMAND_ALIASES_ASK_AI,
     COMMAND_ALIASES_HELP,
     COMMAND_ALIASES_HISTORY,
@@ -86,6 +87,7 @@ from handlers.commands import (
     cmd_setup,
     cmd_stata,
     cmd_status,
+    cmd_wipe,
 )
 from handlers.finance import handle_financial_message
 
@@ -413,6 +415,8 @@ def register_commands(dispatcher: Dispatcher):
         dispatcher.register_bootstrap_command(alias, cmd_chat)
     for alias in COMMAND_ALIASES_CLEAR_AI:
         dispatcher.register_command(alias, cmd_clear_pending)
+    for alias in COMMAND_ALIASES_WIPE:
+        dispatcher.register_command(alias, cmd_wipe)
     for alias in COMMAND_ALIASES_ME:
         dispatcher.register_bootstrap_command(alias, cmd_me)
 

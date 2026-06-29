@@ -460,3 +460,15 @@ class Database:
                 """
             )
             return result.rowcount or 0
+
+    @staticmethod
+    async def wipe_all() -> dict:
+        pool = Database._require_pool()
+        async with pool.connection() as conn:
+            async with conn.transaction():
+                r1 = await conn.execute("DELETE FROM finances")
+                r2 = await conn.execute("DELETE FROM messages")
+                return {
+                    "finances": r1.rowcount or 0,
+                    "messages": r2.rowcount or 0,
+                }
