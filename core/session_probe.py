@@ -77,16 +77,13 @@ def _get_ws_headers():
     return {
         "Origin": MAX_WS_ORIGIN,
         "User-Agent": MAX_USER_AGENT,
-        "Accept-Language": MAX_ACCEPT_LANGUAGE,
-        "Sec-CH-UA": '"Chromium";v="130", "Not?A_Brand";v="99"',
-        "Sec-CH-UA-Mobile": "?0",
-        "Sec-CH-UA-Platform": '"Windows"',
     }
 
 
 def _get_ws_connect_kwargs():
     kwargs = {
         "impersonate": MAX_IMPERSONATE,
+        "default_headers": False,
         "headers": _get_ws_headers(),
         "http_version": "v1",
     }

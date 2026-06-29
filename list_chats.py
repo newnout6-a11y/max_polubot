@@ -150,12 +150,13 @@ async def main():
     ws_headers = {
         "Origin": MAX_WS_ORIGIN,
         "User-Agent": MAX_USER_AGENT,
-        "Accept-Language": MAX_ACCEPT_LANGUAGE,
-        "Sec-CH-UA": '"Chromium";v="130", "Not?A_Brand";v="99"',
-        "Sec-CH-UA-Mobile": "?0",
-        "Sec-CH-UA-Platform": '"Windows"',
     }
-    ws_kwargs = {"impersonate": MAX_IMPERSONATE, "headers": ws_headers, "http_version": "v1"}
+    ws_kwargs = {
+        "impersonate": MAX_IMPERSONATE,
+        "default_headers": False,
+        "headers": ws_headers,
+        "http_version": "v1",
+    }
     if SOCKS_PROXY_URL:
         ws_kwargs["proxies"] = {"https": SOCKS_PROXY_URL, "http": SOCKS_PROXY_URL}
 
