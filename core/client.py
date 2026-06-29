@@ -99,7 +99,7 @@ class MaxWebsocketClient:
         self._user_cache.clear()
         users = []
 
-        for key in ("users", "contacts"):
+        for key in ("contacts", "users"):
             value = payload.get(key)
             if isinstance(value, list):
                 users.extend(value)
@@ -111,9 +111,10 @@ class MaxWebsocketClient:
                 if isinstance(value, list):
                     users.extend(value)
 
-        profile = payload.get("profile") or payload.get("me") or payload.get("user")
-        if isinstance(profile, dict):
-            users.append(profile)
+        profile = payload.get("profile") or {}
+        contact = profile.get("contact")
+        if isinstance(contact, dict):
+            users.append(contact)
 
         for user in users:
             if not isinstance(user, dict):
@@ -121,14 +122,26 @@ class MaxWebsocketClient:
             uid = user.get("id") or user.get("userId") or user.get("contactId")
             if uid is None:
                 continue
-            name = (
-                user.get("name")
-                or user.get("title")
-                or user.get("firstName")
-                or user.get("displayName")
-                or user.get("fullName")
-                or user.get("username")
-            )
+
+            name = None
+            names_list = user.get("names")
+            if isinstance(names_list, list) and names_list:
+                for n in names_list:
+                    if isinstance(n, dict):
+                        name = n.get("name") or n.get("firstName")
+                        if name:
+                            break
+
+            if not name:
+                name = (
+                    user.get("name")
+                    or user.get("title")
+                    or user.get("firstName")
+                    or user.get("displayName")
+                    or user.get("fullName")
+                    or user.get("username")
+                )
+
             if name:
                 self._user_cache[int(uid)] = str(name).strip()
 
@@ -376,28 +389,7 @@ class MaxWebsocketClient:
             self.authenticated = True
             self.last_error = None
             self.last_authenticated_at = int(time.time())
-            sync_payload = sync_resp.get("payload") or {}
-            logger.info("Sync response keys: %s", list(sync_payload.keys()))
-
-            contacts = sync_payload.get("contacts") or []
-            for c in contacts[:3]:
-                logger.info("Contact sample: %r", c)
-
-            profile = sync_payload.get("profile") or {}
-            logger.info("Profile sample: %r", profile)
-
-            chats = sync_payload.get("chats") or []
-            if chats:
-                first_chat = chats[0] if isinstance(chats, list) else {}
-                if isinstance(first_chat, dict):
-                    logger.info("First chat keys: %s", list(first_chat.keys()))
-                    for k in ("members", "users", "contacts", "participants"):
-                        if first_chat.get(k):
-                            logger.info("First chat[%s] sample: %r", k, first_chat[k][:2] if isinstance(first_chat[k], list) else first_chat[k])
-                else:
-                    logger.info("First chat type: %s", type(first_chat).__name__)
-
-            self._build_user_cache(sync_payload)
+            self._build_user_cache(sync_resp.get("payload") or {})
             logger.info("User cache built: %d users", len(self._user_cache))
             await self._send_recv_direct(22, {"settings": {"user": {"HIDDEN": True}}})
 
