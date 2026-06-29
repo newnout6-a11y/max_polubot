@@ -14,6 +14,27 @@ from core.config import (
 logger = logging.getLogger(__name__)
 
 
+def _split_text(text: str, max_len: int = 4000) -> list[str]:
+    """Split long text into chunks on line boundaries."""
+    if len(text) <= max_len:
+        return [text]
+    lines = text.split("\n")
+    chunks = []
+    current = []
+    current_len = 0
+    for line in lines:
+        line_len = len(line) + 1
+        if current_len + line_len > max_len and current:
+            chunks.append("\n".join(current))
+            current = []
+            current_len = 0
+        current.append(line)
+        current_len += line_len
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
 @dataclass(frozen=True)
 class QueuedMessage:
     text: str
@@ -56,15 +77,19 @@ class MessageQueue:
             self._worker_task = None
 
     async def put(self, text: str, chat_id: int | None = None):
-        """Add a message to the outgoing queue."""
+        """Add a message to the outgoing queue. Auto-splits long messages."""
         if chat_id is None and self.default_chat_id_getter:
             chat_id = self.default_chat_id_getter()
-        message = QueuedMessage(text=text, chat_id=int(chat_id) if chat_id is not None else None)
-        try:
-            await asyncio.wait_for(self.queue.put(message), timeout=QUEUE_PUT_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError as exc:
-            raise TimeoutError("Outgoing message queue is full") from exc
-        logger.debug("Message queued. Queue size: %s", self.queue.qsize())
+        cid = int(chat_id) if chat_id is not None else None
+
+        chunks = _split_text(text, 4000)
+        for chunk in chunks:
+            message = QueuedMessage(text=chunk, chat_id=cid)
+            try:
+                await asyncio.wait_for(self.queue.put(message), timeout=QUEUE_PUT_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError as exc:
+                raise TimeoutError("Outgoing message queue is full") from exc
+        logger.debug("Message queued (%d chunks). Queue size: %s", len(chunks), self.queue.qsize())
 
     def stats(self):
         return {
