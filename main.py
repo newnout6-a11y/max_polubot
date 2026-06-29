@@ -336,14 +336,13 @@ async def watchdog_processor(client: MaxWebsocketClient):
     last_session_probe_at = 0
     while True:
         try:
-            db_ok = await Database.ping()
-            runtime["last_checks"]["database"] = {"ok": db_ok, "checked_at": _now()}
-
             should_probe_session = (
                 _now() - last_session_probe_at >= WATCHDOG_SESSION_CHECK_INTERVAL_SECONDS
                 and (not client.authenticated or client.last_error)
             )
             if should_probe_session:
+                db_ok = await Database.ping()
+                runtime["last_checks"]["database"] = {"ok": db_ok, "checked_at": _now()}
                 result = await probe_session(client.device_id, client.token)
                 last_session_probe_at = _now()
                 runtime["last_checks"]["session"] = {
@@ -355,6 +354,8 @@ async def watchdog_processor(client: MaxWebsocketClient):
                 if result.invalid_session:
                     client.last_error = f"{result.error}: {result.message or ''}".strip()
                     logger.critical("MAX session became invalid: %s", client.last_error)
+            else:
+                runtime["last_checks"]["database"] = {"ok": True, "checked_at": _now(), "skipped": True}
         except asyncio.CancelledError:
             raise
         except Exception as exc:
