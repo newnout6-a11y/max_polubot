@@ -210,7 +210,7 @@ class Database:
     @staticmethod
     async def get_recent_messages(chat_id, limit=10):
         pool = Database._require_pool()
-        limit = max(1, min(int(limit), 50))
+        limit = max(1, min(int(limit), 200))
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(

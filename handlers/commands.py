@@ -220,7 +220,7 @@ def _parse_history_days(args: str) -> int:
     return max(1, min(days, HISTORY_MAX_DAYS))
 
 
-def _parse_preview_limit(args: str, default: int = 10, maximum: int = 50) -> int:
+def _parse_preview_limit(args: str, default: int = 10, maximum: int = 200) -> int:
     raw = (args or "").strip().split()
     if not raw:
         return default
