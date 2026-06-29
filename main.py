@@ -320,6 +320,7 @@ async def background_ai_processor():
 async def self_ping_loop():
     """Ping own /health endpoint to prevent HF Space from sleeping."""
     ping_url = f"http://127.0.0.1:{WEB_PORT}/health"
+    await asyncio.sleep(10)
     while True:
         try:
             async with httpx.AsyncClient(timeout=10) as c:
