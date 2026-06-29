@@ -91,6 +91,7 @@ class MaxWebsocketClient:
         kwargs = {
             "impersonate": MAX_IMPERSONATE,
             "headers": self._get_ws_headers(),
+            "http_version": "1.1",
         }
         if SOCKS_PROXY_URL:
             kwargs["proxies"] = {"https": SOCKS_PROXY_URL, "http": SOCKS_PROXY_URL}
