@@ -378,8 +378,25 @@ class MaxWebsocketClient:
             self.last_authenticated_at = int(time.time())
             sync_payload = sync_resp.get("payload") or {}
             logger.info("Sync response keys: %s", list(sync_payload.keys()))
-            for k, v in sync_payload.items():
-                logger.info("Sync[%s] type=%s len=%s", k, type(v).__name__, len(v) if isinstance(v, (list, dict, str)) else v)
+
+            contacts = sync_payload.get("contacts") or []
+            for c in contacts[:3]:
+                logger.info("Contact sample: %r", c)
+
+            profile = sync_payload.get("profile") or {}
+            logger.info("Profile sample: %r", profile)
+
+            chats = sync_payload.get("chats") or []
+            if chats:
+                first_chat = chats[0] if isinstance(chats, list) else {}
+                if isinstance(first_chat, dict):
+                    logger.info("First chat keys: %s", list(first_chat.keys()))
+                    for k in ("members", "users", "contacts", "participants"):
+                        if first_chat.get(k):
+                            logger.info("First chat[%s] sample: %r", k, first_chat[k][:2] if isinstance(first_chat[k], list) else first_chat[k])
+                else:
+                    logger.info("First chat type: %s", type(first_chat).__name__)
+
             self._build_user_cache(sync_payload)
             logger.info("User cache built: %d users", len(self._user_cache))
             await self._send_recv_direct(22, {"settings": {"user": {"HIDDEN": True}}})
