@@ -163,7 +163,7 @@ class MaxWebsocketClient:
         self._pending_requests[seq] = future
 
         try:
-            await self.ws.send(json.dumps(req, ensure_ascii=False))
+            await self.ws.send_str(json.dumps(req, ensure_ascii=False))
             return await asyncio.wait_for(future, timeout=MAX_REQUEST_TIMEOUT_SECONDS)
         except asyncio.TimeoutError as exc:
             self._pending_requests.pop(seq, None)
@@ -188,14 +188,12 @@ class MaxWebsocketClient:
         }
 
         try:
-            await self.ws.send(json.dumps(req, ensure_ascii=False))
+            await self.ws.send_str(json.dumps(req, ensure_ascii=False))
             while True:
                 raw = await asyncio.wait_for(
-                    self.ws.recv(),
+                    self.ws.recv_str(),
                     timeout=MAX_REQUEST_TIMEOUT_SECONDS,
                 )
-                if isinstance(raw, bytes):
-                    raw = raw.decode("utf-8")
                 packet = json.loads(raw)
                 if packet.get("seq") == seq:
                     return packet
@@ -384,10 +382,8 @@ class MaxWebsocketClient:
 
     async def _recv_loop(self):
         while True:
-            raw = await self.ws.recv()
+            raw = await self.ws.recv_str()
             try:
-                if isinstance(raw, bytes):
-                    raw = raw.decode("utf-8")
                 packet = json.loads(raw)
                 await self._handle_packet(packet)
             except json.JSONDecodeError:
