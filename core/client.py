@@ -527,6 +527,9 @@ class MaxWebsocketClient:
                 await self._handle_packet(packet)
             except json.JSONDecodeError:
                 logger.debug("Received non-JSON WebSocket frame (likely pong/control)")
+            except (ConnectionError, OSError, RuntimeError) as exc:
+                logger.warning("WebSocket connection lost in recv_loop: %s", exc)
+                raise
             except Exception as exc:
                 logger.error("Error handling message: %s", exc)
 
