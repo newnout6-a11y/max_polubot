@@ -94,6 +94,7 @@ AI_REQUEST_TIMEOUT_SECONDS = _float_env("AI_REQUEST_TIMEOUT_SECONDS", 45.0)
 AI_LOOP_INTERVAL_SECONDS = _float_env("AI_LOOP_INTERVAL_SECONDS", 15.0)
 AI_MESSAGE_DELAY_SECONDS = _float_env("AI_MESSAGE_DELAY_SECONDS", 3.0)
 AI_BATCH_LIMIT = _int_env("AI_BATCH_LIMIT", 20)
+AI_PARSE_BATCH_SIZE = _int_env("AI_PARSE_BATCH_SIZE", 50)
 AI_MAX_PARSE_ATTEMPTS = _int_env("AI_MAX_PARSE_ATTEMPTS", 5)
 AI_RETRY_BASE_SECONDS = _float_env("AI_RETRY_BASE_SECONDS", 60.0)
 AI_RETRY_MAX_SECONDS = _float_env("AI_RETRY_MAX_SECONDS", 3600.0)
@@ -192,6 +193,11 @@ MAX_KEEPALIVE_INTERVAL_SECONDS = _float_env("MAX_KEEPALIVE_INTERVAL_SECONDS", 30
 MAX_BACKOFF_INITIAL_SECONDS = _float_env("MAX_BACKOFF_INITIAL_SECONDS", 1.0)
 MAX_BACKOFF_MAX_SECONDS = _float_env("MAX_BACKOFF_MAX_SECONDS", 60.0)
 
+MAX_IMPERSONATE = _env("MAX_IMPERSONATE", "chrome")
+MAX_PING_INTERVAL_SECONDS = _float_env("MAX_PING_INTERVAL_SECONDS", 20.0)
+SOCKS_PROXY_URL = _env("SOCKS_PROXY_URL", "")
+MAX_ACCEPT_LANGUAGE = _env("MAX_ACCEPT_LANGUAGE", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7")
+
 SESSION_CHECK_TIMEOUT_SECONDS = _float_env("SESSION_CHECK_TIMEOUT_SECONDS", 20.0)
 STARTUP_SESSION_CHECK = _bool_env("STARTUP_SESSION_CHECK", True)
 WATCHDOG_INTERVAL_SECONDS = _float_env("WATCHDOG_INTERVAL_SECONDS", 60.0)
@@ -235,6 +241,8 @@ def validate_startup_config() -> StartupValidation:
         errors.append("COMMAND_PREFIX cannot be empty")
     if AI_BATCH_LIMIT <= 0:
         errors.append("AI_BATCH_LIMIT must be positive")
+    if AI_PARSE_BATCH_SIZE <= 0:
+        errors.append("AI_PARSE_BATCH_SIZE must be positive")
     if AI_MAX_PARSE_ATTEMPTS <= 0:
         errors.append("AI_MAX_PARSE_ATTEMPTS must be positive")
     if AI_RETRY_BASE_SECONDS <= 0:
@@ -269,5 +277,7 @@ def validate_startup_config() -> StartupValidation:
         errors.append("SESSION_CHECK_TIMEOUT_SECONDS must be positive")
     if not MAX_DEVICE_TYPE:
         errors.append("MAX_DEVICE_TYPE cannot be empty")
+    if MAX_PING_INTERVAL_SECONDS < 0:
+        errors.append("MAX_PING_INTERVAL_SECONDS cannot be negative")
 
     return StartupValidation(errors=errors, warnings=warnings)

@@ -18,6 +18,7 @@ from core.config import (
     AI_CONFIG_ERROR_COOLDOWN_SECONDS,
     ADMIN_IDS,
     AI_BATCH_LIMIT,
+    AI_PARSE_BATCH_SIZE,
     AI_LOOP_INTERVAL_SECONDS,
     AI_MESSAGE_DELAY_SECONDS,
     COMMAND_ALIASES_CHECKS,
@@ -276,10 +277,11 @@ async def background_ai_processor():
                 msg_id = row["id"]
                 text = row["text"]
                 ts = row["timestamp"]
+                sender_name = row.get("sender_name")
 
                 logger.info("AI processing message %s...", msg_id)
                 try:
-                    transactions = await parse_financial_message(text, settings=settings)
+                    transactions = await parse_financial_message(text, settings=settings, sender_name=sender_name)
                     await Database.replace_finances(msg_id, transactions, ts)
                     logger.info("Parsed %s transactions for message %s", len(transactions), msg_id)
                 except AIProviderError as exc:
@@ -413,6 +415,7 @@ def default_runtime_settings():
         "openai_wire_api": OPENAI_WIRE_API,
         "openai_reasoning_effort": OPENAI_REASONING_EFFORT,
         "disable_response_storage": DISABLE_RESPONSE_STORAGE,
+        "ai_parse_batch_size": AI_PARSE_BATCH_SIZE,
         "deepseek_api_key": DEEPSEEK_API_KEY,
         "deepseek_model": DEEPSEEK_MODEL,
         "deepseek_base_url": DEEPSEEK_BASE_URL,

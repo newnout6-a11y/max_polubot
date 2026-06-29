@@ -36,4 +36,4 @@ async def handle_financial_message(
         chat_id=chat_id,
         sender_name=sender_name,
     )
-    logger.info("Saved message %s from target chat.", msg_id)
+    logger.info("Saved message %s from %s in target chat.", msg_id, sender_name or sender_id)

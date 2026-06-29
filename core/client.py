@@ -4,18 +4,21 @@ import logging
 import random
 import time
 
-import websockets
+from curl_cffi.requests import AsyncSession
 
 from core.config import (
+    MAX_ACCEPT_LANGUAGE,
     MAX_APP_VERSION,
     MAX_BACKOFF_INITIAL_SECONDS,
     MAX_BACKOFF_MAX_SECONDS,
     MAX_DEVICE_LOCALE,
     MAX_DEVICE_NAME,
     MAX_DEVICE_TYPE,
+    MAX_IMPERSONATE,
     MAX_KEEPALIVE_INTERVAL_SECONDS,
     MAX_LOCALE,
     MAX_OS_VERSION,
+    MAX_PING_INTERVAL_SECONDS,
     MAX_PROTOCOL_VERSION,
     MAX_REQUEST_TIMEOUT_SECONDS,
     MAX_SCREEN,
@@ -23,6 +26,7 @@ from core.config import (
     MAX_USER_AGENT,
     MAX_WS_ORIGIN,
     MAX_WS_URL,
+    SOCKS_PROXY_URL,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,6 +77,25 @@ class MaxWebsocketClient:
             "deviceId": self.device_id,
         }
 
+    def _get_ws_headers(self):
+        return {
+            "Origin": MAX_WS_ORIGIN,
+            "User-Agent": MAX_USER_AGENT,
+            "Accept-Language": MAX_ACCEPT_LANGUAGE,
+            "Sec-CH-UA": '"Chromium";v="130", "Not?A_Brand";v="99"',
+            "Sec-CH-UA-Mobile": "?0",
+            "Sec-CH-UA-Platform": '"Windows"',
+        }
+
+    def _get_ws_connect_kwargs(self):
+        kwargs = {
+            "impersonate": MAX_IMPERSONATE,
+            "headers": self._get_ws_headers(),
+        }
+        if SOCKS_PROXY_URL:
+            kwargs["proxies"] = {"https": SOCKS_PROXY_URL, "http": SOCKS_PROXY_URL}
+        return kwargs
+
     def _fail_pending(self, exc):
         for seq, future in list(self._pending_requests.items()):
             if not future.done():
@@ -96,7 +119,10 @@ class MaxWebsocketClient:
     async def stop(self):
         self._stopping = True
         if self.ws is not None:
-            await self.ws.close()
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
 
         for task in list(self._handler_tasks):
             task.cancel()
@@ -170,6 +196,8 @@ class MaxWebsocketClient:
                     self.ws.recv(),
                     timeout=MAX_REQUEST_TIMEOUT_SECONDS,
                 )
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8")
                 packet = json.loads(raw)
                 if packet.get("seq") == seq:
                     return packet
@@ -252,17 +280,20 @@ class MaxWebsocketClient:
                 self.authenticated = False
                 self.last_error = str(exc)
                 self.reconnect_count += 1
-                logger.error("WebSocket disconnected: %s. Reconnecting in %.1fs...", exc, backoff)
-                await asyncio.sleep(backoff)
+                jittered_backoff = backoff * random.uniform(0.8, 1.2)
+                logger.error("WebSocket disconnected: %s. Reconnecting in %.1fs...", exc, jittered_backoff)
+                await asyncio.sleep(jittered_backoff)
                 backoff = min(MAX_BACKOFF_MAX_SECONDS, backoff * 2)
 
     async def _connect_and_listen(self):
-        async for ws in websockets.connect(
-            MAX_WS_URL,
-            origin=MAX_WS_ORIGIN,
-            user_agent_header=MAX_USER_AGENT,
-            ping_interval=None,
-        ):
+        session = AsyncSession()
+        ws = None
+        keepalive_task = None
+        ping_task = None
+
+        try:
+            ws = await session.ws_connect(MAX_WS_URL, **self._get_ws_connect_kwargs())
+
             if self._stopping:
                 await ws.close()
                 return
@@ -271,67 +302,95 @@ class MaxWebsocketClient:
             self.connected = True
             self.authenticated = False
             self.last_connected_at = int(time.time())
-            keepalive_task = None
 
+            logger.info("[*] Connected to MAX WebSocket (impersonate=%s)", MAX_IMPERSONATE)
+
+            await self._send_recv_direct(6, self._get_hello_payload())
+            sync_resp = await self._send_recv_direct(
+                19,
+                {
+                    "token": self.token,
+                    "interactive": True,
+                    "chatsCount": 40,
+                    "chatsSync": 0,
+                    "contactsSync": 0,
+                    "presenceSync": 0,
+                    "draftsSync": 0,
+                },
+            )
+
+            if "error" in sync_resp.get("payload", {}):
+                error = sync_resp["payload"]["error"]
+                logger.critical("MAX auth failed: %s. Refresh SESSION_JSON with auth.py.", error)
+                raise SessionAuthError(str(error))
+
+            self.authenticated = True
+            self.last_error = None
+            self.last_authenticated_at = int(time.time())
+            await self._send_recv_direct(22, {"settings": {"user": {"HIDDEN": True}}})
+
+            keepalive_task = asyncio.create_task(self._keepalive_loop())
+            if MAX_PING_INTERVAL_SECONDS > 0:
+                ping_task = asyncio.create_task(self._protocol_ping_loop())
+
+            await self._recv_loop()
+
+        except Exception as exc:
+            logger.warning("Connection closed: %s", exc)
+            raise
+        finally:
+            self.connected = False
+            self.authenticated = False
+            self.ws = None
+            self._fail_pending(ConnectionError("MAX WebSocket disconnected"))
+            if keepalive_task:
+                keepalive_task.cancel()
+                await asyncio.gather(keepalive_task, return_exceptions=True)
+            if ping_task:
+                ping_task.cancel()
+                await asyncio.gather(ping_task, return_exceptions=True)
+            if ws is not None:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
             try:
-                logger.info("[*] Connected to MAX WebSocket")
-
-                await self._send_recv_direct(6, self._get_hello_payload())
-                sync_resp = await self._send_recv_direct(
-                    19,
-                    {
-                        "token": self.token,
-                        "interactive": True,
-                        "chatsCount": 40,
-                        "chatsSync": 0,
-                        "contactsSync": 0,
-                        "presenceSync": 0,
-                        "draftsSync": 0,
-                    },
-                )
-
-                if "error" in sync_resp.get("payload", {}):
-                    error = sync_resp["payload"]["error"]
-                    logger.critical("MAX auth failed: %s. Refresh SESSION_JSON with auth.py.", error)
-                    raise SessionAuthError(str(error))
-
-                self.authenticated = True
-                self.last_error = None
-                self.last_authenticated_at = int(time.time())
-                await self._send_recv_direct(22, {"settings": {"user": {"HIDDEN": True}}})
-
-                keepalive_task = asyncio.create_task(self._keepalive_loop())
-                await self._recv_loop()
-
-            except websockets.exceptions.ConnectionClosed as exc:
-                logger.warning("Connection closed by server: %s", exc)
-                raise
-            finally:
-                self.connected = False
-                self.authenticated = False
-                self.ws = None
-                self._fail_pending(ConnectionError("MAX WebSocket disconnected"))
-                if keepalive_task:
-                    keepalive_task.cancel()
-                    await asyncio.gather(keepalive_task, return_exceptions=True)
+                await session.close()
+            except Exception:
+                pass
 
     async def _keepalive_loop(self):
-        """Send periodic MAX pings to keep the session alive."""
+        """Send periodic MAX protocol pings (opcode 1) to keep the session alive."""
         while True:
             await asyncio.sleep(MAX_KEEPALIVE_INTERVAL_SECONDS)
             if self.connected:
                 try:
                     await self._send(1, {"interactive": False})
                     self.last_keepalive_at = int(time.time())
-                    logger.debug("Ping sent")
+                    logger.debug("MAX keepalive sent")
                 except Exception as exc:
                     logger.warning("Keepalive failed: %s", exc)
                     break
 
+    async def _protocol_ping_loop(self):
+        """Send RFC 6455 protocol-level ping frames to keep proxies happy."""
+        while True:
+            await asyncio.sleep(MAX_PING_INTERVAL_SECONDS)
+            if self.ws is not None:
+                try:
+                    await self.ws.ping()
+                    logger.debug("WebSocket protocol ping sent")
+                except Exception as exc:
+                    logger.warning("Protocol ping failed: %s", exc)
+                    break
+
     async def _recv_loop(self):
-        async for msg_text in self.ws:
+        while True:
+            raw = await self.ws.recv()
             try:
-                packet = json.loads(msg_text)
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8")
+                packet = json.loads(raw)
                 await self._handle_packet(packet)
             except json.JSONDecodeError:
                 logger.warning("Received non-JSON WebSocket packet")

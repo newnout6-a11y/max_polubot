@@ -119,6 +119,9 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS idx_messages_unparsed ON messages (is_parsed, next_parse_at, timestamp)"
             )
             await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_chat_timestamp ON messages (chat_id, timestamp DESC)"
+            )
+            await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_finances_date_category ON finances (date, category)"
             )
             await conn.execute(
@@ -242,23 +245,6 @@ class Database:
                 return await cur.fetchall()
 
     @staticmethod
-    async def mark_parsed(msg_id):
-        pool = Database._require_pool()
-        async with pool.connection() as conn:
-            await conn.execute(
-                """
-                UPDATE messages
-                SET is_parsed = TRUE,
-                    last_error = NULL,
-                    next_parse_at = 0,
-                    parsed_at = %s,
-                    updated_at = %s
-                WHERE id = %s
-                """,
-                (int(time.time()), int(time.time()), msg_id),
-            )
-
-    @staticmethod
     async def mark_parse_failed(msg_id, error, retry_after_seconds: float | None = None):
         pool = Database._require_pool()
         now = int(time.time())
@@ -303,32 +289,33 @@ class Database:
         now = int(time.time())
 
         async with pool.connection() as conn:
-            await conn.execute("DELETE FROM finances WHERE message_id = %s", (message_id,))
-            for transaction in transactions:
+            async with conn.transaction():
+                await conn.execute("DELETE FROM finances WHERE message_id = %s", (message_id,))
+                for transaction in transactions:
+                    await conn.execute(
+                        """
+                        INSERT INTO finances (message_id, category, expense, income, date)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (
+                            message_id,
+                            transaction.category,
+                            transaction.expense,
+                            transaction.income,
+                            normalized_date,
+                        ),
+                    )
                 await conn.execute(
                     """
-                    INSERT INTO finances (message_id, category, expense, income, date)
-                    VALUES (%s, %s, %s, %s, %s)
+                    UPDATE messages
+                    SET is_parsed = TRUE,
+                        last_error = NULL,
+                        parsed_at = %s,
+                        updated_at = %s
+                    WHERE id = %s
                     """,
-                    (
-                        message_id,
-                        transaction.category,
-                        transaction.expense,
-                        transaction.income,
-                        normalized_date,
-                    ),
+                    (now, now, message_id),
                 )
-            await conn.execute(
-                """
-                UPDATE messages
-                SET is_parsed = TRUE,
-                    last_error = NULL,
-                    parsed_at = %s,
-                    updated_at = %s
-                WHERE id = %s
-                """,
-                (now, now, message_id),
-            )
 
     @staticmethod
     async def get_stats(start_timestamp):

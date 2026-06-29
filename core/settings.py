@@ -88,6 +88,12 @@ SETTINGS = {
         default=False,
         description="When true, sends store=false to Responses API.",
     ),
+    "ai_parse_batch_size": SettingSpec(
+        key="ai_parse_batch_size",
+        value_type=int,
+        default=50,
+        description="Saved chat messages sent to AI in one finance parsing request.",
+    ),
     "deepseek_api_key": SettingSpec(
         key="deepseek_api_key",
         value_type=str,
@@ -201,6 +207,8 @@ def normalize_key(key: str) -> str:
         "wire_api": "openai_wire_api",
         "reasoning_effort": "openai_reasoning_effort",
         "disable_storage": "disable_response_storage",
+        "parse_batch": "ai_parse_batch_size",
+        "batch_size": "ai_parse_batch_size",
         "deepseek_key": "deepseek_api_key",
     }
     normalized = aliases.get(normalized, normalized)
@@ -252,6 +260,8 @@ def validate_setting(key: str, value):
         raise ValueError("queue_typing_chars_per_second must be positive")
     if key == "queue_typing_max_delay" and float(value) < 0:
         raise ValueError("queue_typing_max_delay cannot be negative")
+    if key == "ai_parse_batch_size" and int(value) <= 0:
+        raise ValueError("ai_parse_batch_size must be positive")
 
 
 def mask_value(value) -> str:

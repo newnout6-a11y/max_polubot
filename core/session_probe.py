@@ -2,13 +2,15 @@ import asyncio
 import json
 from dataclasses import dataclass
 
-import websockets
+from curl_cffi.requests import AsyncSession
 
 from core.config import (
+    MAX_ACCEPT_LANGUAGE,
     MAX_APP_VERSION,
     MAX_DEVICE_LOCALE,
     MAX_DEVICE_NAME,
     MAX_DEVICE_TYPE,
+    MAX_IMPERSONATE,
     MAX_LOCALE,
     MAX_OS_VERSION,
     MAX_PROTOCOL_VERSION,
@@ -18,6 +20,7 @@ from core.config import (
     MAX_WS_ORIGIN,
     MAX_WS_URL,
     SESSION_CHECK_TIMEOUT_SECONDS,
+    SOCKS_PROXY_URL,
 )
 
 
@@ -46,6 +49,8 @@ async def _send_recv(ws, seq, opcode, payload):
     await ws.send(json.dumps(_packet(seq, opcode, payload), ensure_ascii=False))
     while True:
         raw = await asyncio.wait_for(ws.recv(), timeout=SESSION_CHECK_TIMEOUT_SECONDS)
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
         message = json.loads(raw)
         if message.get("seq") == seq:
             return message
@@ -68,6 +73,27 @@ def _hello_payload(device_id):
     }
 
 
+def _get_ws_headers():
+    return {
+        "Origin": MAX_WS_ORIGIN,
+        "User-Agent": MAX_USER_AGENT,
+        "Accept-Language": MAX_ACCEPT_LANGUAGE,
+        "Sec-CH-UA": '"Chromium";v="130", "Not?A_Brand";v="99"',
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": '"Windows"',
+    }
+
+
+def _get_ws_connect_kwargs():
+    kwargs = {
+        "impersonate": MAX_IMPERSONATE,
+        "headers": _get_ws_headers(),
+    }
+    if SOCKS_PROXY_URL:
+        kwargs["proxies"] = {"https": SOCKS_PROXY_URL, "http": SOCKS_PROXY_URL}
+    return kwargs
+
+
 async def probe_session(device_id: str | None, token: str | None) -> SessionProbeResult:
     if not device_id or not token:
         return SessionProbeResult(
@@ -76,32 +102,37 @@ async def probe_session(device_id: str | None, token: str | None) -> SessionProb
             message="deviceId/device_id and token are required",
         )
 
+    session = AsyncSession()
     try:
-        async with websockets.connect(
-            MAX_WS_URL,
-            origin=MAX_WS_ORIGIN,
-            user_agent_header=MAX_USER_AGENT,
-            ping_interval=None,
-            open_timeout=SESSION_CHECK_TIMEOUT_SECONDS,
-            close_timeout=5,
-        ) as ws:
-            await _send_recv(ws, 1, 6, _hello_payload(device_id))
-            login = await _send_recv(
-                ws,
-                2,
-                19,
-                {
-                    "token": token,
-                    "interactive": True,
-                    "chatsCount": 1,
-                    "chatsSync": 0,
-                    "contactsSync": 0,
-                    "presenceSync": 0,
-                    "draftsSync": 0,
-                },
-            )
+        ws = await session.ws_connect(MAX_WS_URL, **_get_ws_connect_kwargs())
+    except Exception as exc:
+        await session.close()
+        return SessionProbeResult(ok=False, error="probe.error", message=str(exc))
+
+    try:
+        await _send_recv(ws, 1, 6, _hello_payload(device_id))
+        login = await _send_recv(
+            ws,
+            2,
+            19,
+            {
+                "token": token,
+                "interactive": True,
+                "chatsCount": 1,
+                "chatsSync": 0,
+                "contactsSync": 0,
+                "presenceSync": 0,
+                "draftsSync": 0,
+            },
+        )
     except Exception as exc:
         return SessionProbeResult(ok=False, error="probe.error", message=str(exc))
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+        await session.close()
 
     payload = login.get("payload") or {}
     if "error" in payload:

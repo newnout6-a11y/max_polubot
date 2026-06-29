@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import math
 import random
 from dataclasses import dataclass
 
@@ -75,9 +74,12 @@ class MessageQueue:
         }
 
     def _typing_delay(self, text: str) -> float:
-        base = random.uniform(self.min_delay, self.max_delay)
-        typing_seconds = math.sqrt(max(len(text), 1)) / self.typing_chars_per_second
-        jitter = random.uniform(0.65, 1.35)
+        base = max(self.min_delay, min(self.max_delay, random.gauss(
+            (self.min_delay + self.max_delay) / 2,
+            (self.max_delay - self.min_delay) / 4,
+        )))
+        typing_seconds = len(text) / self.typing_chars_per_second
+        jitter = max(0.5, min(1.5, random.gauss(1.0, 0.2)))
         delay = base + (typing_seconds * jitter)
         return min(delay, self.typing_max_delay)
 
@@ -95,12 +97,15 @@ class MessageQueue:
             error,
         )
         await asyncio.sleep(delay)
-        await self.queue.put(
-            QueuedMessage(
-                text=message.text,
-                chat_id=message.chat_id,
-                attempts=message.attempts + 1,
-            )
+        await asyncio.wait_for(
+            self.queue.put(
+                QueuedMessage(
+                    text=message.text,
+                    chat_id=message.chat_id,
+                    attempts=message.attempts + 1,
+                )
+            ),
+            timeout=QUEUE_PUT_TIMEOUT_SECONDS,
         )
 
     async def _worker_loop(self):

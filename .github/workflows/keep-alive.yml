@@ -1,0 +1,26 @@
+name: Keep HF Space Alive
+
+on:
+  schedule:
+    - cron: '0 */12 * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping HF Space liveness
+        run: |
+          response=$(curl -sf -o /dev/null -w "%{http_code}" https://vladimiroff777-bot-max.hf.space/ || true)
+          echo "Liveness endpoint returned HTTP $response"
+          if [ "$response" != "200" ]; then
+            echo "::warning::Liveness endpoint did not return 200"
+          fi
+
+      - name: Ping HF Space health
+        run: |
+          response=$(curl -sf -o /dev/null -w "%{http_code}" https://vladimiroff777-bot-max.hf.space/health || true)
+          echo "Health endpoint returned HTTP $response"
+          if [ "$response" != "200" ]; then
+            echo "::warning::Health endpoint did not return 200"
+          fi

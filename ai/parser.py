@@ -57,8 +57,8 @@ def _response_json(response: httpx.Response, provider: str):
 
 class Transaction(BaseModel):
     category: str = Field(description="Lowercase category or item name.")
-    expense: int = Field(default=0, ge=0, description="Positive amount spent.")
-    income: int = Field(default=0, ge=0, description="Positive amount earned.")
+    expense: int = Field(default=0, ge=0, description="Amount spent in rubles, positive integer.")
+    income: int = Field(default=0, ge=0, description="Amount earned in rubles, positive integer.")
 
     @field_validator("category")
     @classmethod
@@ -73,7 +73,20 @@ class ExtractionResult(BaseModel):
     transactions: List[Transaction] = Field(default_factory=list)
 
 
+class MessageExtraction(BaseModel):
+    message_id: str
+    transactions: List[Transaction] = Field(default_factory=list)
+
+
+class BatchExtractionResult(BaseModel):
+    messages: List[MessageExtraction] = Field(default_factory=list)
+
+
 FINANCE_INSTRUCTIONS = "Return only valid JSON."
+FINANCE_BATCH_INSTRUCTIONS = (
+    "Return only valid JSON. Extract finance transactions from chat messages. "
+    "Include every input message_id exactly once."
+)
 GENERAL_AI_INSTRUCTIONS = (
     "You are a helpful assistant inside a MAX chat bot. "
     "Answer concisely, in Russian by default, unless the user asks otherwise."
@@ -177,7 +190,8 @@ def _raise_ai_status(response: httpx.Response, provider: str):
     )
 
 
-def _prompt(text: str) -> str:
+def _prompt(text: str, sender_name: str | None = None) -> str:
+    sender_line = f"От: {sender_name}\n" if sender_name else ""
     return (
         "Верни только JSON. Извлеки финансовые операции из сообщения чата. "
         "Схема ответа: "
@@ -186,7 +200,30 @@ def _prompt(text: str) -> str:
         "Расход: купил, потратил, оплатил, списали, минус, spent, paid. "
         "Доход: получил, доход, зарплата, плюс, зачислили, received. "
         "Не придумывай суммы. Сообщение: "
-        f"{json.dumps(text, ensure_ascii=False)}"
+        f"{sender_line}{json.dumps(text, ensure_ascii=False)}"
+    )
+
+
+def _batch_prompt(messages: list[dict]) -> str:
+    payload = [
+        {
+            "message_id": str(message["id"]),
+            "sender": str(message.get("sender_name") or ""),
+            "text": str(message.get("text") or ""),
+        }
+        for message in messages
+    ]
+    return (
+        "Верни только JSON. Извлеки финансовые операции из списка сообщений чата. "
+        "Схема ответа: "
+        '{"messages":[{"message_id":"string","transactions":[{"category":"string","expense":0,"income":0}]}]}. '
+        "Для каждого входного message_id верни ровно один объект в messages. "
+        'Если в сообщении нет расхода или дохода, верни "transactions":[] для этого message_id. '
+        "Расход: купил, потратил, оплатил, списали, минус, spent, paid. "
+        "Доход: получил, доход, зарплата, плюс, зачислили, received. "
+        "Не придумывай суммы и не смешивай разные message_id. "
+        "Сообщения JSON: "
+        f"{json.dumps(payload, ensure_ascii=False)}"
     )
 
 
@@ -207,7 +244,7 @@ def _is_byesu_base_url(base_url: str) -> bool:
     return "api.byesu.com" in str(base_url).lower()
 
 
-async def _parse_with_gemini(text: str, api_key: str, model: str) -> List[Transaction]:
+async def _parse_with_gemini(text: str, api_key: str, model: str, sender_name: str | None = None) -> List[Transaction]:
     client = _get_gemini_client(api_key)
     if not client:
         raise RuntimeError("Gemini API client is not initialized.")
@@ -217,7 +254,7 @@ async def _parse_with_gemini(text: str, api_key: str, model: str) -> List[Transa
     def run_sync():
         return client.models.generate_content(
             model=model,
-            contents=_prompt(text),
+            contents=_prompt(text, sender_name=sender_name),
             config={
                 "response_mime_type": "application/json",
                 "response_schema": ExtractionResult,
@@ -237,6 +274,39 @@ async def _parse_with_gemini(text: str, api_key: str, model: str) -> List[Transa
 
     data = json.loads(response.text or "{}")
     return ExtractionResult(**data).transactions
+
+
+async def _parse_batch_with_gemini(messages: list[dict], api_key: str, model: str) -> dict[str, List[Transaction]]:
+    client = _get_gemini_client(api_key)
+    if not client:
+        raise RuntimeError("Gemini API client is not initialized.")
+
+    loop = asyncio.get_running_loop()
+
+    def run_sync():
+        return client.models.generate_content(
+            model=model,
+            contents=_batch_prompt(messages),
+            config={
+                "response_mime_type": "application/json",
+                "response_schema": BatchExtractionResult,
+            },
+        )
+
+    response = await asyncio.wait_for(
+        loop.run_in_executor(None, run_sync),
+        timeout=AI_REQUEST_TIMEOUT_SECONDS,
+    )
+
+    parsed = getattr(response, "parsed", None)
+    if isinstance(parsed, BatchExtractionResult):
+        result = parsed
+    elif isinstance(parsed, dict):
+        result = BatchExtractionResult(**parsed)
+    else:
+        result = BatchExtractionResult(**json.loads(response.text or "{}"))
+
+    return {item.message_id: item.transactions for item in result.messages}
 
 
 async def _chat_completions_request(
@@ -282,9 +352,9 @@ async def _chat_completions_request(
         ) from exc
 
 
-async def _parse_with_openai_compatible(text: str, api_key: str, model: str, base_url: str):
+async def _parse_with_openai_compatible(text: str, api_key: str, model: str, base_url: str, sender_name: str | None = None):
     content = await _chat_completions_request(
-        _prompt(text),
+        _prompt(text, sender_name=sender_name),
         api_key,
         model,
         base_url,
@@ -292,6 +362,24 @@ async def _parse_with_openai_compatible(text: str, api_key: str, model: str, bas
         json_mode=True,
     )
     return ExtractionResult(**_loads_json_object(content)).transactions
+
+
+async def _parse_batch_with_openai_compatible(
+    messages: list[dict],
+    api_key: str,
+    model: str,
+    base_url: str,
+):
+    content = await _chat_completions_request(
+        _batch_prompt(messages),
+        api_key,
+        model,
+        base_url,
+        FINANCE_BATCH_INSTRUCTIONS,
+        json_mode=True,
+    )
+    result = BatchExtractionResult(**_loads_json_object(content))
+    return {item.message_id: item.transactions for item in result.messages}
 
 
 def _extract_response_text(data: dict) -> str:
@@ -421,7 +509,7 @@ async def _parse_with_responses_api(
     return _extract_response_text(data)
 
 
-async def parse_financial_message(text: str, settings=None) -> List[Transaction]:
+async def parse_financial_message(text: str, settings=None, sender_name: str | None = None) -> List[Transaction]:
     """Parse a chat message into financial transactions."""
     if not text.strip():
         return []
@@ -432,12 +520,12 @@ async def parse_financial_message(text: str, settings=None) -> List[Transaction]
 
     try:
         if config["provider"] == "gemini":
-            return await _parse_with_gemini(text, config["api_key"], config["model"])
+            return await _parse_with_gemini(text, config["api_key"], config["model"], sender_name=sender_name)
 
         if config["wire_api"] == "responses":
             try:
                 content = await _parse_with_responses_api(
-                    _prompt(text),
+                    _prompt(text, sender_name=sender_name),
                     config["api_key"],
                     config["model"],
                     config["base_url"],
@@ -461,6 +549,7 @@ async def parse_financial_message(text: str, settings=None) -> List[Transaction]
                         config["api_key"],
                         config["model"],
                         config["base_url"],
+                        sender_name=sender_name,
                     )
                 raise
 
@@ -469,9 +558,78 @@ async def parse_financial_message(text: str, settings=None) -> List[Transaction]
             config["api_key"],
             config["model"],
             config["base_url"],
+            sender_name=sender_name,
         )
     except Exception as exc:
         logger.error("AI API error provider=%s: %s", config["provider"], exc)
+        raise
+
+
+async def parse_financial_messages_batch(messages: list[dict], settings=None) -> dict[str, List[Transaction]]:
+    """Parse saved chat messages into financial transactions keyed by message id."""
+    normalized_messages = [
+        {
+            "id": str(message["id"]),
+            "text": str(message.get("text") or "").strip(),
+            "sender_name": str(message.get("sender_name") or "").strip(),
+        }
+        for message in messages
+        if str(message.get("text") or "").strip()
+    ]
+    if not normalized_messages:
+        return {}
+
+    config = _provider_config(settings)
+    if not config["api_key"]:
+        raise RuntimeError(f"{config['provider']} API key is not configured.")
+
+    try:
+        if config["provider"] == "gemini":
+            return await _parse_batch_with_gemini(
+                normalized_messages,
+                config["api_key"],
+                config["model"],
+            )
+
+        if config["wire_api"] == "responses":
+            try:
+                content = await _parse_with_responses_api(
+                    _batch_prompt(normalized_messages),
+                    config["api_key"],
+                    config["model"],
+                    config["base_url"],
+                    config["reasoning_effort"],
+                    config["disable_response_storage"],
+                    FINANCE_BATCH_INSTRUCTIONS,
+                    json_mode=True,
+                )
+                result = BatchExtractionResult(**_loads_json_object(content))
+                return {item.message_id: item.transactions for item in result.messages}
+            except AIProviderError as exc:
+                if (
+                    (exc.status_code == 400 or (exc.status_code and exc.status_code >= 500))
+                    and not _is_byesu_base_url(config["base_url"])
+                ):
+                    logger.warning(
+                        "Responses API failed for batch, falling back to chat_completions once: %s",
+                        exc,
+                    )
+                    return await _parse_batch_with_openai_compatible(
+                        normalized_messages,
+                        config["api_key"],
+                        config["model"],
+                        config["base_url"],
+                    )
+                raise
+
+        return await _parse_batch_with_openai_compatible(
+            normalized_messages,
+            config["api_key"],
+            config["model"],
+            config["base_url"],
+        )
+    except Exception as exc:
+        logger.error("AI batch API error provider=%s: %s", config["provider"], exc)
         raise
 
 

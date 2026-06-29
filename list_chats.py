@@ -5,14 +5,16 @@ import sys
 import warnings
 from pathlib import Path
 
-import websockets
+from curl_cffi.requests import AsyncSession
 from dotenv import load_dotenv
 
 from core.config import (
+    MAX_ACCEPT_LANGUAGE,
     MAX_APP_VERSION,
     MAX_DEVICE_LOCALE,
     MAX_DEVICE_NAME,
     MAX_DEVICE_TYPE,
+    MAX_IMPERSONATE,
     MAX_LOCALE,
     MAX_OS_VERSION,
     MAX_PROTOCOL_VERSION,
@@ -22,6 +24,7 @@ from core.config import (
     MAX_WS_ORIGIN,
     MAX_WS_URL,
     SESSION_FILE,
+    SOCKS_PROXY_URL,
 )
 
 
@@ -48,6 +51,8 @@ async def send_recv(ws, seq, opcode, payload):
     await ws.send(json.dumps(packet(seq, opcode, payload), ensure_ascii=False))
     while True:
         raw = await asyncio.wait_for(ws.recv(), timeout=20)
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
         message = json.loads(raw)
         if message.get("seq") == seq:
             return message
@@ -142,12 +147,21 @@ async def main():
     print(f"Session source: {source}")
     print("Mode: read-only raw websocket; no auth flow, no .max_session, no chat messages")
 
-    async with websockets.connect(
-        MAX_WS_URL,
-        origin=MAX_WS_ORIGIN,
-        user_agent_header=MAX_USER_AGENT,
-        ping_interval=None,
-    ) as ws:
+    ws_headers = {
+        "Origin": MAX_WS_ORIGIN,
+        "User-Agent": MAX_USER_AGENT,
+        "Accept-Language": MAX_ACCEPT_LANGUAGE,
+        "Sec-CH-UA": '"Chromium";v="130", "Not?A_Brand";v="99"',
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": '"Windows"',
+    }
+    ws_kwargs = {"impersonate": MAX_IMPERSONATE, "headers": ws_headers}
+    if SOCKS_PROXY_URL:
+        ws_kwargs["proxies"] = {"https": SOCKS_PROXY_URL, "http": SOCKS_PROXY_URL}
+
+    session = AsyncSession()
+    ws = await session.ws_connect(MAX_WS_URL, **ws_kwargs)
+    try:
         await send_recv(ws, 1, 6, hello_payload(device_id))
         login = await send_recv(
             ws,
@@ -163,6 +177,12 @@ async def main():
                 "draftsSync": 0,
             },
         )
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+        await session.close()
 
     payload = login.get("payload") or {}
     if "error" in payload:

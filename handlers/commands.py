@@ -3,9 +3,16 @@ import shlex
 import time
 from datetime import datetime
 
-from ai.parser import AIProviderError, ask_ai, is_ai_available, parse_financial_message
+from ai.parser import (
+    AIProviderError,
+    ask_ai,
+    is_ai_available,
+    parse_financial_message,
+    parse_financial_messages_batch,
+)
 from core.config import (
     COMMAND_PREFIX,
+    AI_PARSE_BATCH_SIZE,
     HISTORY_DEFAULT_DAYS,
     HISTORY_MAX_DAYS,
     HISTORY_MAX_MESSAGES,
@@ -128,25 +135,45 @@ async def cmd_parse_finance(client, args, sender_id, context=None):
             )
         return
 
+    batch_size = max(1, int(settings.get("ai_parse_batch_size") if settings else AI_PARSE_BATCH_SIZE))
     parsed_count = 0
     tx_count = 0
+    ai_calls = 0
     errors = []
-    for row in rows:
+
+    async def parse_rows_batch(batch):
+        nonlocal parsed_count, tx_count, ai_calls
+        if not batch:
+            return
         try:
-            transactions = await parse_financial_message(row["text"], settings=settings)
+            ai_calls += 1
+            parsed = await parse_financial_messages_batch(batch, settings=settings)
+        except Exception as exc:
+            if len(batch) > 1:
+                midpoint = len(batch) // 2
+                await parse_rows_batch(batch[:midpoint])
+                await parse_rows_batch(batch[midpoint:])
+                return
+            await Database.mark_parse_failed(batch[0]["id"], exc)
+            errors.append(str(exc))
+            return
+
+        for row in batch:
+            transactions = parsed.get(str(row["id"]), [])
             await Database.replace_finances(row["id"], transactions, row["timestamp"])
             parsed_count += 1
             tx_count += len(transactions)
-        except Exception as exc:
-            await Database.mark_parse_failed(row["id"], exc)
-            errors.append(str(exc))
-            if len(errors) >= 3:
-                break
+
+    for index in range(0, len(rows), batch_size):
+        await parse_rows_batch(rows[index : index + batch_size])
+        if len(errors) >= 3:
+            break
 
     lines = [
         f"\u0420\u0430\u0437\u0431\u043e\u0440 \u0437\u0430 {title} \u0433\u043e\u0442\u043e\u0432.",
         f"- \u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439: {parsed_count}/{len(rows)}",
         f"- \u0422\u0440\u0430\u043d\u0437\u0430\u043a\u0446\u0438\u0439: {tx_count}",
+        f"- AI-\u0432\u044b\u0437\u043e\u0432\u043e\u0432: {ai_calls}",
     ]
     if errors:
         lines.append(f"- \u041e\u0448\u0438\u0431\u043a\u0430 AI: {errors[0]}")
