@@ -429,7 +429,7 @@ class MaxWebsocketClient:
 
             if text and msg_id:
                 self.last_message_at = int(time.time())
-                logger.debug("Incoming message %s from chat %s", msg_id, chat_id)
+                logger.info("Incoming message %s from chat %s: sender_id=%s sender_name=%s", msg_id, chat_id, sender_id, sender_name)
                 task = asyncio.create_task(
                     self.dispatcher.process_message(
                         self,

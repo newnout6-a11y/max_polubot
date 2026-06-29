@@ -1,7 +1,9 @@
 import logging
 import shlex
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+MOSCOW_TZ = timezone(timedelta(hours=3))
 
 from ai.parser import (
     AIProviderError,
@@ -219,7 +221,7 @@ def _parse_preview_limit(args: str, default: int = 10, maximum: int = 50) -> int
 
 def _format_ts(timestamp) -> str:
     try:
-        return datetime.fromtimestamp(int(timestamp)).strftime("%Y-%m-%d %H:%M")
+        return datetime.fromtimestamp(int(timestamp), tz=MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
     except (TypeError, ValueError, OSError):
         return "unknown-time"
 
@@ -286,17 +288,20 @@ async def cmd_history(client, args, sender_id, context=None):
             if not text:
                 continue
 
+            sender_name = (
+                client._extract_sender_name(message)
+                if hasattr(client, "_extract_sender_name")
+                else None
+            )
+            logger.info("History msg %s: sender=%s sender_name=%s time=%s", msg_id, message.get("sender"), sender_name, timestamp)
+
             await Database.save_message(
                 msg_id,
                 text,
                 message.get("sender") or 0,
                 timestamp,
                 chat_id=target_chat_id,
-                sender_name=(
-                    client._extract_sender_name(message)
-                    if hasattr(client, "_extract_sender_name")
-                    else None
-                ),
+                sender_name=sender_name,
             )
             saved += 1
 
