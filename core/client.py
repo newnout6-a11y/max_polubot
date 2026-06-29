@@ -418,6 +418,9 @@ class MaxWebsocketClient:
 
         if "message" in payload and isinstance(payload["message"], dict):
             msg = payload["message"]
+            logger.info("RAW message payload keys: %s", list(msg.keys()))
+            logger.info("RAW message sender field: %r", msg.get("sender"))
+            logger.info("RAW payload keys: %s", list(payload.keys()))
             chat_id = payload.get("chatId")
             if chat_id is None:
                 chat_id = msg.get("chatId")
