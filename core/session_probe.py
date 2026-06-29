@@ -88,7 +88,7 @@ def _get_ws_connect_kwargs():
     kwargs = {
         "impersonate": MAX_IMPERSONATE,
         "headers": _get_ws_headers(),
-        "http_version": "1.1",
+        "http_version": "v1",
     }
     if SOCKS_PROXY_URL:
         kwargs["proxies"] = {"https": SOCKS_PROXY_URL, "http": SOCKS_PROXY_URL}

@@ -155,7 +155,7 @@ async def main():
         "Sec-CH-UA-Mobile": "?0",
         "Sec-CH-UA-Platform": '"Windows"',
     }
-    ws_kwargs = {"impersonate": MAX_IMPERSONATE, "headers": ws_headers, "http_version": "1.1"}
+    ws_kwargs = {"impersonate": MAX_IMPERSONATE, "headers": ws_headers, "http_version": "v1"}
     if SOCKS_PROXY_URL:
         ws_kwargs["proxies"] = {"https": SOCKS_PROXY_URL, "http": SOCKS_PROXY_URL}
 
