@@ -374,7 +374,7 @@ class MaxWebsocketClient:
             await asyncio.sleep(MAX_PING_INTERVAL_SECONDS)
             if self.ws is not None:
                 try:
-                    await self.ws.ping()
+                    await self.ws.ping(b"keepalive")
                     logger.debug("WebSocket protocol ping sent")
                 except Exception as exc:
                     logger.warning("Protocol ping failed: %s", exc)
